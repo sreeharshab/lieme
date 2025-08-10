@@ -1,0 +1,6 @@
+include LICENSE
+include logo.png
+include README.md
+recursive-include example *
+recursive-include lieme *.py
+prune tests

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lieme"
+version = "0.1.1"
+description = "Li-ion Intercalation Electrode Materials Exploration"
+readme = "README.md"
+authors = [
+    { name = "Sree Harsha Bhimineni", email = "bsreeharsha@g.ucla.edu" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.11.0"
+dependencies = [
+    "tpot>=0.12.2",
+    "ase>=3.23.0",
+    "pymatgen>=2025.1.9",
+    "matminer>=0.9.3",
+    "mp-api>=0.45.3",
+    "openpyxl"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8"
+]
+
+[project.urls]
+Homepage = "https://github.com/sreeharshab/lieme"
+
+[tool.setuptools.packages.find]
+exclude = ["tests", "tests.*"]

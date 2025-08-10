@@ -1,0 +1,3 @@
+Material: Li3VO4, Formula: Li12V4O16:
+     Site       Li Intercalation Energy (eV) Average Li-M Distance Average Li-B Distance Average M-B Distance      Charge on Li             Charge on M             Charge on B      
+
