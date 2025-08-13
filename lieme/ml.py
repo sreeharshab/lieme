@@ -7,12 +7,13 @@ import logging
 from itertools import combinations
 from packaging import version
 import pandas as pd
-from pandas import DataFrame
+from pandas import DataFrame, Series
 import numpy as np
 from sklearn.metrics import get_scorer
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
+import shap
 import tpot
 from collections import Counter
 from matplotlib import pyplot as plt
@@ -428,7 +429,58 @@ class MaterialsEchemRegressor:
         plt.ylabel(f"Frequency in top models (Train CV score > {cv_score_cutoff})")
         plt.savefig(f"feature_counts.png", bbox_inches='tight')
         return fig
+    
+    def get_shap_values(self, X_train: Optional[DataFrame]=None, cv_score_cutoff: float=0.5, sample_size: int=100, shap_dir: str="shaps", save_shap: bool=True) -> Tuple[DataFrame, Series]:
+        """Computes the mean absolute SHAP values for all features across all top models.
 
+        Args:
+            X_train (Optional[DataFrame], optional): Input material features. If None, `X_train.pkl` should be present in the working directory. Defaults to None.
+            cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
+            sample_size (int, optional): Number of samples used to compute SHAP. Defaults to 100.
+            shap_dir (str, optional): Directory to store the full SHAP values for each feature in each top model. Defaults to "shaps".
+            save_shap (bool, optional): If True, saves the full SHAP values for each feature in each top model in `shap_dir`. Defaults to True.
+
+        Returns:
+            DataFrame: Mean absolute SHAP values for each feature in each top model.
+            Series: Mean absolute SHAP values for each feature averaged across all top models.
+        """
+        self.process_train_results()
+        if X_train is None:
+            X_train = pd.read_pickle("X_train.pkl")
+        metadata = self.metadata
+        top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
+        shap_list = []
+        if save_shap:
+            os.makedirs(shap_dir, exist_ok=True)
+        for _, row in top_models_info.iterrows():
+            job_id = row['job_id']
+            features = row['features']
+            model = self.models[job_id]
+            X_subset = X_train[list(features)]
+            if len(X_subset) > sample_size:
+                X_sample = X_subset.sample(sample_size, random_state=42)
+            else:
+                X_sample = X_subset
+            try:
+                def predictor(X):
+                    return model.predict(X)
+                explainer = shap.KernelExplainer(predictor, X_sample)
+                shap_values = explainer(X_sample)
+                if save_shap:
+                    with open(os.path.join(shap_dir, f"shap_{job_id}.pkl"), "wb") as f:
+                        pickle.dump(shap_values, f)
+                mean_abs_shap = np.abs(shap_values.values).mean(axis=0)
+                shap_list.append(pd.Series(mean_abs_shap, index=features, name=job_id))
+            except Exception as e:
+                logging.error(f"SHAP failed for job_id {job_id} due to the following error.\n{e}")
+                continue
+        if not shap_list:
+            return pd.DataFrame(), pd.Series(dtype=float)
+        shap_df = pd.DataFrame(shap_list).fillna(0)
+        shap_df = shap_df.reset_index().rename(columns={"index": "job_id"})
+        model_avg_shap = shap_df.drop(columns="job_id").mean(axis=0).sort_values(ascending=False)
+        return shap_df, model_avg_shap
+    
     def test(self, 
              X_test: Optional[DataFrame]=None,
              cv_score_cutoff: float=0.5,
