@@ -1,5 +1,5 @@
-from lieme.io import get_atoms_with_charges
 import os
+from lieme.io import get_atoms_with_charges
 
 def test_get_atoms_with_charges():
     root = os.getcwd()

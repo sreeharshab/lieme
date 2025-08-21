@@ -1,5 +1,5 @@
-from lieme.io import DOS
 import os
+from lieme.io import DOS
 
 def test_dos():
     root = os.getcwd()

@@ -1,4 +1,3 @@
-from lieme.featurize import GetFeatures
 from collections import Counter
 from typing import List, Tuple, Callable, Dict, Optional
 import pandas as pd
@@ -10,6 +9,7 @@ from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.io.ase import AseAtomsAdaptor
 from matminer.featurizers.structure import DensityFeatures, MaximumPackingEfficiency
 from matminer.featurizers.composition import ElementProperty
+from lieme.featurize import GetFeatures
 
 class FetchMaterials:
     def __init__(self, api_key: str):
@@ -23,7 +23,7 @@ class FetchMaterials:
         self.composition_space = None
         self.structure_space = None
         self.df_train = None
-    
+   
     def get_composition_space(self) -> List[str]:
         """Provides the composition space of the training data.
 
@@ -139,7 +139,7 @@ class FetchMaterials:
         ]
         return filtered_results
     
-    def get_M_B(self, result: SummaryDoc) -> Tuple[List[str], List[str]]:
+    def get_m_b(self, result: SummaryDoc) -> Tuple[List[str], List[str]]:
         """Extracts the elements, metals, and bridging elements from a material's SummaryDoc object.
 
         Args:
@@ -174,8 +174,8 @@ class FetchMaterials:
             max_void_radius = features.get_max_void_radius(result.structure)
             atoms = AseAtomsAdaptor.get_atoms(result.structure)
             lattice_parameters = list(atoms.cell.cellpar()[0:3]/atoms.get_volume())
-            _, features.metals, features.bridging_elements = self.get_M_B(result)
-            distances = features.get_Li_M_B_distances(atoms, custom_cutoffs=custom_cutoffs)
+            _, features.metals, features.bridging_elements = self.get_m_b(result)
+            distances = features.get_li_m_b_distances(atoms, custom_cutoffs=custom_cutoffs)
             try:
                 dos_data = features.get_dos_data(dos=self.mpr.get_dos_by_material_id(result.material_id))
             except MPRestError:

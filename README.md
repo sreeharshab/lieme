@@ -59,7 +59,7 @@ n in n_Li is a positive integer. Site can be replaced with any custom name. An e
 from lieme.featurize import get_material_features
 
 materials = [material]
-X = get_material_features(materials=materials)
+x = get_material_features(materials=materials)
 ```
 
 ## Obtaining Input Features from Materials Project
@@ -68,7 +68,7 @@ Input features can also be generated for materials in Materials Project.
 from lieme.mpfetch import FetchMaterials
 
 fetcher = FetchMaterials(api_key="MATERIALS PROJECT API KEY")
-X = fetcher.get_material_features()
+x = fetcher.get_material_features()
 ```
 
 When fetching materials from Materials Project, `standard_constraints` are passed to filter results. You can add additional constraints using `custom_constraints`. `standard_constraints` can also be switched off by passing `standard_constraints=False` to `get_material_features()`.
@@ -93,6 +93,6 @@ The performance of new materials can be predicted after training the models.
 predictions = regressor.test()
 ```
 
-Make sure you have `X_train`, `Y_train` and `X_test` as .pkl files when you run the code mentioned above. If not, pass in `X_train` and `Y_train` in `train()` and `X_test` in `test()`.
+Make sure you have `x_train`, `y_train` and `x_test` as .pkl files when you run the code mentioned above. If not, pass in `x_train` and `y_train` in `train()` and `x_test` in `test()`.
 
 For advanced usage, refer to the detailed documentation in the respective modules.

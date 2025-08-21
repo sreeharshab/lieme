@@ -1,6 +1,6 @@
-from lieme.featurize import get_material_features
 import os
 from pandas import DataFrame
+from lieme.featurize import get_material_features
 
 def test_featurize():
     root = os.getcwd()

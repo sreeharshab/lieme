@@ -1,10 +1,12 @@
 import os
 import glob
-import pickle, json
+import pickle
+import json
 import sqlite3
 from typing import Tuple, List, Optional
 import logging
 from itertools import combinations
+from collections import Counter
 from packaging import version
 import pandas as pd
 from pandas import DataFrame, Series
@@ -15,13 +17,12 @@ from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
 import shap
 import tpot
-from collections import Counter
 from matplotlib import pyplot as plt
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 class MaterialsEchemRegressor:
-    def __init__(self, 
+    def __init__(self,
                  jobs_path: str="jobs.pkl",
                  results_dir: str="results",
                  db_path: str="results.db"
@@ -41,49 +42,49 @@ class MaterialsEchemRegressor:
         self.train_results_processed = False
 
     def preprocess_data(self, 
-                        tag: Optional[str]=None, 
-                        X: Optional[DataFrame]=None, 
-                        Y: Optional[DataFrame]=None, 
-                        excluded_materials: List[str]=["MoS2","VO2-M","VO2-R"], 
-                        max_correlation_allowed: float=0.8, 
-                        PCA_n_components: int=2, 
-                        PCA_n_features: int=33
+                        tag: Optional[str]=None,
+                        x: Optional[DataFrame]=None,
+                        y: Optional[DataFrame]=None,
+                        excluded_materials: List[str]=["MoS2","VO2-M","VO2-R"],
+                        max_correlation_allowed: float=0.8,
+                        pca_n_components: int=2,
+                        pca_n_features: int=33
                         ) -> Tuple[DataFrame, DataFrame]:
         """Preprocesses the material features and electrochemical performance data.
 
         Args:
             tag (Optional[str], optional): Features are preprocessed from a file with the name `material_features_{tag}.pkl` if `tag` is provided, otherwise from `material_features.pkl`. Defaults to None.
-            X (Optional[DataFrame], optional): If `X` is None, features are preprocessed from `material_features.pkl`. Defaults to None.
-            Y (Optional[DataFrame], optional): If `Y` is None, electrochemical performance is preprocessed from `exp_data.xlsx`. Defaults to None.
+            x (Optional[DataFrame], optional): If `x` is None, features are preprocessed from `material_features.pkl`. Defaults to None.
+            y (Optional[DataFrame], optional): If `y` is None, electrochemical performance is preprocessed from `exp_data.xlsx`. Defaults to None.
             excluded_materials (List[str], optional): Materials present in `material_features.pkl` to be excluded in preprocessing. Defaults to ["MoS2","VO2-M","VO2-R"].
             max_correlation_allowed (float, optional): Correlation cutoff to omit highly correlated features. Defaults to 0.8.
-            PCA_n_components (int, optional): Number of components in the PCA analysis. Defaults to 2.
-            PCA_n_features (int, optional): Number of top features to be considered according to PCA. Defaults to 33.
+            pca_n_components (int, optional): Number of components in the PCA analysis. Defaults to 2.
+            pca_n_features (int, optional): Number of top features to be considered according to PCA. Defaults to 33.
 
         Returns:
-            Tuple[DataFrame, DataFrame]: Processed `X` and `Y` which can be used to train the models.
+            Tuple[DataFrame, DataFrame]: Processed `x` and `y` which can be used to train the models.
         """
-        if X is None:
+        if x is None:
             file_name = f"material_features_{tag}.pkl" if tag else "material_features.pkl"
             try:
-                X = pd.read_pickle(file_name)
+                x = pd.read_pickle(file_name)
             except:
                 raise FileNotFoundError(
-                f"`X` is not provided and `{file_name}` does not exist.\n"
-                f"Please run `get_material_features(tag={tag})` from `lieme.featurize` or `lieme.mpfetch` to generate the file or provide `X` explicitly."
+                f"`x` is not provided and `{file_name}` does not exist.\n"
+                f"Please run `get_material_features(tag={tag})` from `lieme.featurize` or `lieme.mpfetch` to generate the file or provide `x` explicitly."
             )
-        materials = X["material"].tolist()
-        X = X[[material not in excluded_materials for material in materials]]
-        X = X.reset_index(drop=True)
-        X.loc[X["material"]=="Nb2O5-T", "Band Gap"] = 1.925
-        X.loc[X["material"]=="Nb2O5-TT", "Band Gap"] = 1.773
-        X = X.drop(columns=["material", "formula", "structure", "composition"])
-        X = X.drop([col for col in X.columns if "0.5" in col], axis=1)
-        X = X.loc[:, (X!=0).any(axis=0)]
-        if len(X)>10:
-            X = X.loc[:, X.nunique() > 10]
+        materials = x["material"].tolist()
+        x = x[[material not in excluded_materials for material in materials]]
+        x = x.reset_index(drop=True)
+        x.loc[x["material"]=="Nb2O5-T", "Band Gap"] = 1.925
+        x.loc[x["material"]=="Nb2O5-TT", "Band Gap"] = 1.773
+        x = x.drop(columns=["material", "formula", "structure", "composition"])
+        x = x.drop([col for col in x.columns if "0.5" in col], axis=1)
+        x = x.loc[:, (x!=0).any(axis=0)]
+        if len(x)>10:
+            x = x.loc[:, x.nunique() > 10]
 
-        corr = X.corr(method="pearson").fillna(0)
+        corr = x.corr(method="pearson").fillna(0)
         corr = corr.stack().reset_index()
         corr.columns = ["Feature1", "Feature2", "Correlation"]
         corr = corr[corr["Feature1"] < corr["Feature2"]]
@@ -92,55 +93,55 @@ class MaterialsEchemRegressor:
         high_corr_pairs = high_corr_pairs.reset_index(drop=True)
         feature2 = high_corr_pairs["Feature2"].values
 
-        X = X.drop(columns=np.unique(feature2))
-        X_arr = X.values
+        x = x.drop(columns=np.unique(feature2))
+        x_arr = x.values
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X_arr)
+        x_scaled = scaler.fit_transform(x_arr)
 
-        pca = PCA(n_components=PCA_n_components)
-        pca.fit(X_scaled)
+        pca = PCA(n_components=pca_n_components)
+        pca.fit(x_scaled)
         loadings = np.abs(pca.components_.T)
         explained_variance_ratio = pca.explained_variance_ratio_
         feature_importance = np.dot(loadings, explained_variance_ratio)
         feature_ranking_indices = np.argsort(-feature_importance)
-        selected_features_PCA = X.columns[feature_ranking_indices].values
-        X = X[selected_features_PCA[0:PCA_n_features]]
-        file_name = f"X_{tag}.pkl" if tag else "X.pkl"
-        X.to_pickle(file_name)
+        selected_features_pca = x.columns[feature_ranking_indices].values
+        x = x[selected_features_pca[0:pca_n_features]]
+        file_name = f"x_{tag}.pkl" if tag else "x.pkl"
+        x.to_pickle(file_name)
 
-        if Y is None and os.path.exists("exp_data.xlsx"):
-            Y = pd.read_excel("exp_data.xlsx", header=0)
-        elif Y is None and not os.path.exists("exp_data.xlsx"):
-            logging.info("`Y` is not provided and `exp_data.xlsx` does not exist. Returning `X` only...")
-            return X, None
-        Y = Y[["System", "Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
-        Y = Y.set_index("System")
-        Y = Y.loc[materials, ["Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
-        Y = Y[[material not in excluded_materials for material in materials]]
-        Y["capacity_ratio"] = (Y["Rev. Cap at 0.1C, mAh/g"].values - Y["Rev. Cap at 5C, mAh/g"].values)/Y["Rev. Cap at 0.1C, mAh/g"].values
-        Y = Y["capacity_ratio"]
-        file_name = f"Y_{tag}.pkl" if tag else "Y.pkl"
-        Y.to_pickle(file_name)
+        if y is None and os.path.exists("exp_data.xlsx"):
+            y = pd.read_excel("exp_data.xlsx", header=0)
+        elif y is None and not os.path.exists("exp_data.xlsx"):
+            logging.info("`y` is not provided and `exp_data.xlsx` does not exist. Returning `x` only...")
+            return x, None
+        y = y[["System", "Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
+        y = y.set_index("System")
+        y = y.loc[materials, ["Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
+        y = y[[material not in excluded_materials for material in materials]]
+        y["capacity_ratio"] = (y["Rev. Cap at 0.1C, mAh/g"].values - y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
+        y = y["capacity_ratio"]
+        file_name = f"y_{tag}.pkl" if tag else "y.pkl"
+        y.to_pickle(file_name)
 
-        return X, Y
+        return x, y
     
-    def generate_train_jobs(self, X_train: Optional[DataFrame]=None, n_features: int=4, exclude_jobs: Optional[List]=None):
+    def generate_train_jobs(self, x_train: Optional[DataFrame]=None, n_features: int=4, exclude_jobs: Optional[List]=None):
         """Generates the training jobs by creating combinations of features to be used for training the models.
 
         Args:
-            X_train (Optional[DataFrame], optional): Processed `X`. Defaults to None.
+            x_train (Optional[DataFrame], optional): Processed `x`. Defaults to None.
             n_features (int, optional): Size of the feature subset. Defaults to 4. 
             exclude_jobs (Optional[List], optional): The tuple or index of feature subsets to be excluded. For example, [("Band Gap", "Volume"), ("Volume", "Band Center")] or [4,10]. Defaults to None.
         """
-        if X_train is None:
+        if x_train is None:
             try:
-                X_train = pd.read_pickle("X_train.pkl")
+                x_train = pd.read_pickle("x_train.pkl")
             except:
                 raise FileNotFoundError(
-                f"`X_train` is not provided and `X_train.pkl` does not exist.\n"
-                "Please run `preprocess_data(tag=\"train\")` or provide `X_train` explicitly."
+                f"`x_train` is not provided and `x_train.pkl` does not exist.\n"
+                "Please run `preprocess_data(tag=\"train\")` or provide `x_train` explicitly."
             )
-        column_combinations = list(combinations(X_train.columns,n_features))
+        column_combinations = list(combinations(x_train.columns,n_features))
         if isinstance(exclude_jobs, list) and (all(isinstance(c, tuple) for c in exclude_jobs) or all(isinstance(c, list) for c in exclude_jobs)):
             exclude_jobs = set(frozenset(c) for c in exclude_jobs)
             column_combinations = [c for c in column_combinations if frozenset(c) not in exclude_jobs]
@@ -232,39 +233,39 @@ class MaterialsEchemRegressor:
     
     def train(
             self, 
-            X_train: Optional[DataFrame]=None, 
-            Y_train: Optional[DataFrame]=None, 
+            x_train: Optional[DataFrame]=None, 
+            y_train: Optional[DataFrame]=None, 
             job_id: int=0,
-            TPOT_generations: int=50,
-            TPOT_population_size: int=50,
+            tpot_generations: int=50,
+            tpot_population_size: int=50,
             ) -> Tuple[Pipeline, float]:
         """Trains a model using the specified job_id in reference to the jobs in `jobs.pkl`. Training is done using TPOT.
 
         Args:
-            X_train (Optional[DataFrame], optional): Input material features. If None, `X_train.pkl` should be present in the working directory. Defaults to None.
-            Y_train (Optional[DataFrame], optional): Output electrochemical performance. If None, `Y_train.pkl` should be present in the working directory. Defaults to None.
+            x_train (Optional[DataFrame], optional): Input material features. If None, `x_train.pkl` should be present in the working directory. Defaults to None.
+            y_train (Optional[DataFrame], optional): Output electrochemical performance. If None, `y_train.pkl` should be present in the working directory. Defaults to None.
             job_id (int, optional): ID of the job to be trained. Defaults to 0.
-            TPOT_generations (int, optional): Number of TPOT generations. Refer to documentation of TPOT for more details. Defaults to 50.
-            TPOT_population_size (int, optional): Population size for TPOT. Refer to documentation of TPOT for more details. Defaults to 50.
+            tpot_generations (int, optional): Number of TPOT generations. Refer to documentation of TPOT for more details. Defaults to 50.
+            tpot_population_size (int, optional): Population size for TPOT. Refer to documentation of TPOT for more details. Defaults to 50.
 
         Returns:
             Tuple[Pipeline, float]: The model and its cross-validation score.
         """
-        if X_train is None:
+        if x_train is None:
             try:
-                X_train = pd.read_pickle("X_train.pkl")
+                x_train = pd.read_pickle("x_train.pkl")
             except:
                 raise FileNotFoundError(
-                f"`X_train` is not provided and `X_train.pkl` does not exist.\n"
-                "Please run `preprocess_data(tag=\"train\")` or provide `X_train` explicitly."
+                f"`x_train` is not provided and `x_train.pkl` does not exist.\n"
+                "Please run `preprocess_data(tag=\"train\")` or provide `x_train` explicitly."
             )
-        if Y_train is None:
+        if y_train is None:
             try:
-                Y_train = pd.read_pickle("Y_train.pkl")
+                y_train = pd.read_pickle("y_train.pkl")
             except:
                 raise FileNotFoundError(
-                f"`Y_train` is not provided and `Y_train.pkl` does not exist.\n"
-                "Please run `preprocess_data(tag=\"train\")` or provide `Y_train` explicitly."
+                f"`y_train` is not provided and `y_train.pkl` does not exist.\n"
+                "Please run `preprocess_data(tag=\"train\")` or provide `y_train` explicitly."
             )
         try:
             with open(self.jobs_path, "rb") as f:
@@ -274,20 +275,20 @@ class MaterialsEchemRegressor:
                 f"`jobs.pkl` not found. Please run `generate_train_jobs()` to generate the jobs."
             )
         features = all_combinations[job_id]
-        X_train_subset = X_train[list(features)]
+        x_train_subset = x_train[list(features)]
         if version.parse(tpot.__version__) <= version.parse("0.12.2"):
-            est = tpot.TPOTRegressor(generations=TPOT_generations, population_size=TPOT_population_size, verbosity=2, random_state=42, scoring="r2")
+            est = tpot.TPOTRegressor(generations=tpot_generations, population_size=tpot_population_size, verbosity=2, random_state=42, scoring="r2")
         else:
-            est = tpot.TPOTEstimator(search_space="linear", scorers=["r2"], scorers_weights=[1], classification=False, generations=TPOT_generations, population_size=TPOT_population_size, verbose=2, random_state=42, max_time_mins=None)
+            est = tpot.TPOTEstimator(search_space="linear", scorers=["r2"], scorers_weights=[1], classification=False, generations=tpot_generations, population_size=tpot_population_size, verbose=2, random_state=42, max_time_mins=None)
         try:
             logging.info(f"Training job_id {job_id}...")
-            est.fit(X_train_subset.values, Y_train.values)
+            est.fit(x_train_subset.values, y_train.values)
             model = est.fitted_pipeline_
             if version.parse(tpot.__version__) <= version.parse("0.12.2"):
                 score = est._optimized_pipeline_score
             else:
-                scorer = get_scorer('r2')
-                score = scorer(est, X_train_subset.values, Y_train.values)
+                scorer = get_scorer("r2")
+                score = scorer(est, x_train_subset.values, y_train.values)
         except Exception as e:
             logging.error(f"Cannot train model for job_id {job_id} due to the following error.\n{e}")
             return
@@ -342,14 +343,14 @@ class MaterialsEchemRegressor:
         fig = plt.figure(dpi = 200, figsize=(6,6))
         ax = fig.gca()
         ax.bar(bin_counts.index, bin_counts.values, color="darkorange")
-        for axis in ['top', 'bottom', 'left', 'right']:
+        for axis in ["top", "bottom", "left", "right"]:
             ax.spines[axis].set_linewidth(1.5)
         ax.tick_params(bottom = True, top = True, left = True, right = True)
         ax.tick_params(axis = "x", direction = "in")
         ax.tick_params(axis = "y", direction = "in")
         plt.xlabel("Train CV score range")
         plt.ylabel("Distribution of Train CV score across models")
-        plt.savefig(f"train_score_distribution.png", bbox_inches='tight')
+        plt.savefig("train_score_distribution.png", bbox_inches="tight")
         return fig
     
     def get_feature_counts(self, cv_score_cutoff: float=0.5) -> plt.Figure:
@@ -419,22 +420,22 @@ class MaterialsEchemRegressor:
         ax = fig.gca()
         ax.bar(c, b, color=colors)
         ax.set_xticks(c)
-        ax.set_xticklabels(a_modified, rotation=90, ha='center')
-        for axis in ['top', 'bottom', 'left', 'right']:
+        ax.set_xticklabels(a_modified, rotation=90, ha="center")
+        for axis in ["top", "bottom", "left", "right"]:
             ax.spines[axis].set_linewidth(1.5)
         ax.tick_params(bottom = True, top = True, left = True, right = True)
         ax.tick_params(axis = "x", direction = "in")
         ax.tick_params(axis = "y", direction = "in")
         plt.xlabel("Feature")
         plt.ylabel(f"Frequency in top models (Train CV score > {cv_score_cutoff})")
-        plt.savefig(f"feature_counts.png", bbox_inches='tight')
+        plt.savefig("feature_counts.png", bbox_inches="tight")
         return fig
     
-    def get_shap_values(self, X_train: Optional[DataFrame]=None, cv_score_cutoff: float=0.5, sample_size: int=100, shap_dir: str="shaps", save_shap: bool=True) -> Tuple[DataFrame, Series]:
+    def get_shap_values(self, x_train: Optional[DataFrame]=None, cv_score_cutoff: float=0.5, sample_size: int=100, shap_dir: str="shaps", save_shap: bool=True) -> Tuple[DataFrame, Series]:
         """Computes the mean absolute SHAP values for all features across all top models.
 
         Args:
-            X_train (Optional[DataFrame], optional): Input material features. If None, `X_train.pkl` should be present in the working directory. Defaults to None.
+            x_train (Optional[DataFrame], optional): Input material features. If None, `x_train.pkl` should be present in the working directory. Defaults to None.
             cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
             sample_size (int, optional): Number of samples used to compute SHAP. Defaults to 100.
             shap_dir (str, optional): Directory to store the full SHAP values for each feature in each top model. Defaults to "shaps".
@@ -445,27 +446,27 @@ class MaterialsEchemRegressor:
             Series: Mean absolute SHAP values for each feature averaged across all top models.
         """
         self.process_train_results()
-        if X_train is None:
-            X_train = pd.read_pickle("X_train.pkl")
+        if x_train is None:
+            x_train = pd.read_pickle("x_train.pkl")
         metadata = self.metadata
         top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
         shap_list = []
+        def predictor(x, model):
+            return model.predict(x)
         if save_shap:
             os.makedirs(shap_dir, exist_ok=True)
         for _, row in top_models_info.iterrows():
-            job_id = row['job_id']
-            features = row['features']
+            job_id = row["job_id"]
+            features = row["features"]
             model = self.models[job_id]
-            X_subset = X_train[list(features)]
-            if len(X_subset) > sample_size:
-                X_sample = X_subset.sample(sample_size, random_state=42)
+            x_subset = x_train[list(features)]
+            if len(x_subset) > sample_size:
+                x_sample = x_subset.sample(sample_size, random_state=42)
             else:
-                X_sample = X_subset
+                x_sample = x_subset
             try:
-                def predictor(X):
-                    return model.predict(X)
-                explainer = shap.KernelExplainer(predictor, X_sample)
-                shap_values = explainer(X_sample)
+                explainer = shap.KernelExplainer(predictor, x_sample, model)
+                shap_values = explainer(x_sample)
                 if save_shap:
                     with open(os.path.join(shap_dir, f"shap_{job_id}.pkl"), "wb") as f:
                         pickle.dump(shap_values, f)
@@ -482,51 +483,56 @@ class MaterialsEchemRegressor:
         return shap_df, model_avg_shap
     
     def test(self, 
-             X_test: Optional[DataFrame]=None,
+             x_test: Optional[DataFrame]=None,
              cv_score_cutoff: float=0.5,
              excluded_features: Optional[List[str]]=None
              ) -> DataFrame:
         """Tests the trained models. The test is done using the top models based on the cross-validation score.
 
         Args:
-            X_test (Optional[DataFrame], optional): Input material features. If None, `X_test.pkl` should be present in the working directory. Defaults to None.
+            x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be present in the working directory. Defaults to None.
             cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
             excluded_features (Optional[List[str]], optional): All models which contain the excluded features are not used to test. Defaults to None.
 
         Returns:
-            DataFrame: Average prediction from the top models for all materials in `X_test`.
+            DataFrame: Average prediction from the top models for all materials in `x_test`.
         """
         self.process_train_results()
-        if X_test is None:
+        if x_test is None:
             try:
-                X_test = pd.read_pickle("X_test.pkl")
+                x_test = pd.read_pickle("x_test.pkl")
             except:
                 raise FileNotFoundError(
-                f"`X_test` is not provided and `X_test.pkl` does not exist.\n"
+                f"`x_test` is not provided and `x_test.pkl` does not exist.\n"
             )
-        materials = X_test["material"]
+        materials = x_test["material"]
+        compositions = x_test["composition"]
         metadata = self.metadata
         top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
         predictions = []
+        n_models_used = 0
         for _, row in top_models_info.iterrows():
-            job_id = row['job_id']
-            features = row['features']
+            job_id = row["job_id"]
+            features = row["features"]
             if excluded_features and any(feature in excluded_features for feature in features):
                 continue
             try:
-                X_test_subset = X_test[list(features)]
+                x_test_subset = x_test[list(features)]
+                n_models_used += 1
             except KeyError:
-                logging.info(f"Features {features} not found in `X_test`. Skipping test using model {job_id}.")
+                logging.info(f"Features {features} not found in `x_test`. Skipping test using model {job_id}.")
                 continue
             try:
                 pipeline = self.models[job_id]
-                prediction = pipeline.predict(X_test_subset.values)
+                prediction = pipeline.predict(x_test_subset.values)
                 predictions.append(prediction)
             except Exception as e:
                 logging.error(f"Skipping test using model {job_id} due to the following error.\n{e}")
         avg_predictions = np.mean(predictions, axis=0)
         avg_predictions = pd.DataFrame({
             "material": materials,
+            "composition": compositions,
             "capacity_ratio": avg_predictions
         })
+        logging.info(f"Number of models used to make the predictions is {n_models_used}.")
         return avg_predictions

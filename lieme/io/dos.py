@@ -1,6 +1,6 @@
 import os
-import numpy as np
 from typing import List, Tuple, Optional
+import numpy as np
 
 class DOS:
     """Parses the DOSCAR file generated from a VASP DOS calculation and provides methods to analyze the data.
@@ -21,7 +21,7 @@ class DOS:
         if self.is_parsed:
             return
         assert os.path.exists("DOSCAR"), "DOSCAR is missing. DOS calculation is incomplete. Please check your calculation!"
-        with open("DOSCAR", 'r') as f:
+        with open("DOSCAR", "r") as f:
             lines = f.readlines()
         header = lines[5].split()
         self.fermi_energy = float(header[3])

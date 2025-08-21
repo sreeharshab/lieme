@@ -1,7 +1,7 @@
-from lieme.mpfetch import FetchMaterials
 import os
 from mp_api.client import MPRester
 from pandas import DataFrame
+from lieme.mpfetch import FetchMaterials
 
 def test_mpfetch():
     api_key = os.getenv("MP_API_KEY")

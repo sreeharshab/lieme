@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="lieme",
-    version="0.1.1",
+    version="0.2.0",
     author="Sree Harsha Bhimineni",
     author_email="bsreeharsha@g.ucla.edu",
     description="Li-ion Intercalation Electrode Materials Exploration",
