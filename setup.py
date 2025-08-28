@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="lieme",
-    version="0.2.0",
+    version="0.3.0",
     author="Sree Harsha Bhimineni",
     author_email="bsreeharsha@g.ucla.edu",
     description="Li-ion Intercalation Electrode Materials Exploration",
@@ -26,6 +26,7 @@ setup(
     python_requires=">=3.11.0",
     install_requires=[
         "tpot>=0.12.2",
+        "shap>=0.48.0",
         "ase>=3.23.0",
         "pymatgen>=2025.1.9",
         "matminer>=0.9.3",

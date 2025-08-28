@@ -3,7 +3,7 @@ import glob
 import pickle
 import json
 import sqlite3
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 import logging
 from itertools import combinations
 from collections import Counter
@@ -25,7 +25,8 @@ class MaterialsEchemRegressor:
     def __init__(self,
                  jobs_path: str="jobs.pkl",
                  results_dir: str="results",
-                 db_path: str="results.db"
+                 db_path: str="results.db",
+                 target_property: str="capacity_ratio"
                  ):
         """Initializes the MaterialsEchemRegressor to regress the input features to electrochemical performance output.
 
@@ -33,10 +34,12 @@ class MaterialsEchemRegressor:
             jobs_path (str, optional): Path to the `jobs.pkl` file which contains the tuples of feature subsets corresponding to the training jobs. Defaults to "jobs.pkl".
             results_dir (str, optional): Directory path to store the training results. Defaults to "results".
             db_path (str, optional): SQLite database path to store the training results (models and metadata). Defaults to "results.db".
+            target_property (str, optional): The target property to be predicted. Defaults to "capacity_ratio".
         """
         self.jobs_path = jobs_path
         self.results_dir = results_dir
         self.db_path = db_path
+        self.target_property = target_property
         self.models = None
         self.metadata = None
         self.train_results_processed = False
@@ -118,8 +121,8 @@ class MaterialsEchemRegressor:
         y = y.set_index("System")
         y = y.loc[materials, ["Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
         y = y[[material not in excluded_materials for material in materials]]
-        y["capacity_ratio"] = (y["Rev. Cap at 0.1C, mAh/g"].values - y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
-        y = y["capacity_ratio"]
+        y[self.target_property] = (y["Rev. Cap at 0.1C, mAh/g"].values - y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
+        y = y[self.target_property]
         file_name = f"y_{tag}.pkl" if tag else "y.pkl"
         y.to_pickle(file_name)
 
@@ -451,8 +454,6 @@ class MaterialsEchemRegressor:
         metadata = self.metadata
         top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
         shap_list = []
-        def predictor(x, model):
-            return model.predict(x)
         if save_shap:
             os.makedirs(shap_dir, exist_ok=True)
         for _, row in top_models_info.iterrows():
@@ -465,7 +466,9 @@ class MaterialsEchemRegressor:
             else:
                 x_sample = x_subset
             try:
-                explainer = shap.KernelExplainer(predictor, x_sample, model)
+                def predictor(x):
+                    return model.predict(x)
+                explainer = shap.KernelExplainer(predictor, x_sample)
                 shap_values = explainer(x_sample)
                 if save_shap:
                     with open(os.path.join(shap_dir, f"shap_{job_id}.pkl"), "wb") as f:
@@ -482,7 +485,7 @@ class MaterialsEchemRegressor:
         model_avg_shap = shap_df.drop(columns="job_id").mean(axis=0).sort_values(ascending=False)
         return shap_df, model_avg_shap
     
-    def test(self, 
+    def test(self,
              x_test: Optional[DataFrame]=None,
              cv_score_cutoff: float=0.5,
              excluded_features: Optional[List[str]]=None
@@ -495,7 +498,7 @@ class MaterialsEchemRegressor:
             excluded_features (Optional[List[str]], optional): All models which contain the excluded features are not used to test. Defaults to None.
 
         Returns:
-            DataFrame: Average prediction from the top models for all materials in `x_test`.
+            DataFrame: Average predictions from the top models for all materials in `x_test`.
         """
         self.process_train_results()
         if x_test is None:
@@ -532,7 +535,74 @@ class MaterialsEchemRegressor:
         avg_predictions = pd.DataFrame({
             "material": materials,
             "composition": compositions,
-            "capacity_ratio": avg_predictions
+            self.target_property: avg_predictions
         })
         logging.info(f"Number of models used to make the predictions is {n_models_used}.")
         return avg_predictions
+    
+    def test_wrt_cutoffs(self,
+                         x_test: Optional[DataFrame]=None,
+                         cv_score_cutoffs: Optional[Union[List[float], np.ndarray]]=None,
+                         excluded_features: Optional[List[str]]=None,
+                         target_property_threshold: float=None,
+                         lower_is_better: bool=True
+                         ) -> DataFrame:
+        """Tests the trained models with respect to different cross-validation score cutoffs.
+
+        Args:
+            cv_score_cutoffs (Optional[Union[List[float], np.ndarray]], optional): List of CV score cutoffs to determine top models. If None, cutoffs from 0.45 to 0.56 with a step size of 0.01 are used. Defaults to None.
+            x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be present in the working directory. Defaults to None.
+            excluded_features (Optional[List[str]], optional): All models which contain the excluded features are not used to test. Defaults to None.
+            target_property_threshold (float, optional): Threshold for the target property to consider a material as top. Defaults to None.
+            lower_is_better (bool, optional): If True, lower values of target property are better. Defaults to True.
+        
+        Returns:
+            DataFrame: Average predictions from the top models for all materials in `x_test` with respect to different CV score cutoffs.
+        """
+        if x_test is None:
+            try:
+                x_test = pd.read_pickle("x_test.pkl")
+            except:
+                raise FileNotFoundError(
+                f"`x_test` is not provided and `x_test.pkl` does not exist.\n"
+            )
+        if cv_score_cutoffs is None:
+            cv_score_cutoffs = np.arange(0.45,0.57,0.01)
+        avg_predictions_wrt_cutoffs = []
+        for cutoff in cv_score_cutoffs:
+            avg_predictions = self.test(x_test=x_test, cv_score_cutoff=cutoff, excluded_features=excluded_features)
+            for _, row in avg_predictions.iterrows():
+                avg_predictions_wrt_cutoffs.append({
+                    "material": row["material"],
+                    "composition": row["composition"],
+                    "cv_score_cutoff": cutoff,
+                    self.target_property: row[self.target_property]
+                })
+        avg_predictions_wrt_cutoffs = pd.DataFrame(avg_predictions_wrt_cutoffs)
+        if target_property_threshold is not None:
+            operation = lambda x: (x < target_property_threshold) if lower_is_better else (x > target_property_threshold)
+            mask = avg_predictions_wrt_cutoffs.groupby("material")[self.target_property].transform(operation)
+            avg_predictions_wrt_cutoffs = avg_predictions_wrt_cutoffs[mask]
+        return avg_predictions_wrt_cutoffs
+    
+    def get_element_frequencies(self, avg_predictions: DataFrame, target_property_threshold: float=None, lower_is_better: bool=True) -> Tuple[Tuple, Tuple]:
+        """Calculates the prevelant elements and their frequencies in the top materials based on the average predictions.
+
+        Args:
+            avg_predictions (DataFrame): Average predictions from the `test` method.
+            target_property_threshold (float, optional): Threshold for the target property to consider a material as top. Defaults to 0.3.
+            lower_is_better (bool, optional): If True, lower values of target property are better. Defaults to True.
+
+        Returns:
+            Tuple: Prevelant elements in the top materials.
+            Tuple: Frequency of prevelant elements in the top materials.
+        """
+        if target_property_threshold is not None:
+            operation = lambda x: (x < target_property_threshold) if lower_is_better else (x > target_property_threshold)
+            avg_predictions = avg_predictions[operation(avg_predictions[self.target_property])]
+        counter = Counter()
+        for composition in avg_predictions["composition"]:
+            for element in composition:
+                counter[element] += 1
+        elements, counts = zip(*[(str(element), count) for element, count in counter.most_common()])
+        return elements, counts

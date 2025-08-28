@@ -1,8 +1,7 @@
 # LIEME
-<div align="center">
-    <img src="./logo.png" alt="Description" width="400" height=auto>
-</div>
-<br>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/sreeharshab/lieme/master/logo.png" alt="LIEME logo" width="400">
+</p>
 
 🍋 LIEME: **Li**-ion **I**ntercalation **E**lectrode **M**aterials **E**xploration.
 

@@ -2,7 +2,7 @@
 LIEME: Li-ion Intercalation Electrode Materials Exploration
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .featurize import GetFeatures, get_material_features
 from .ml import MaterialsEchemRegressor
