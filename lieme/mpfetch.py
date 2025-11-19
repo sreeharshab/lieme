@@ -1,6 +1,7 @@
 from collections import Counter
 from typing import List, Tuple, Callable, Dict, Optional
 import pandas as pd
+from ase.calculators.calculator import Calculator
 from mp_api.client import MPRester
 from mp_api.client.core.client import MPRestError
 from emmet.core.summary import SummaryDoc
@@ -88,14 +89,21 @@ class FetchMaterials:
             return False
         return True
     
-    def follows_constraints(self, composition: Composition, structure: Structure, standard_constraints: bool=True, custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None) -> bool:
+    def follows_constraints(self, 
+                            composition: Composition, 
+                            structure: Structure, 
+                            standard_constraints: bool=True, 
+                            custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None
+                            ) -> bool:
         """Checks whether a material follows the specified constraints.
 
         Args:
             composition (Composition): Pymatgen composition object of the material.
             structure (Structure): Pymatgen structure object of the material.
-            standard_constraints (bool, optional): If True, checks whether the material follows the standard constraints. Defaults to True.
-            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, checks whether the material follows the custom constraints. Defaults to None.
+            standard_constraints (bool, optional): If True, checks whether the material follows 
+                the standard constraints. Defaults to True.
+            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, 
+                checks whether the material follows the custom constraints. Defaults to None.
 
         Returns:
             bool: True if the material follows the specified constraints, False otherwise.
@@ -108,12 +116,17 @@ class FetchMaterials:
                     return False
         return check if standard_constraints else True
     
-    def query_mp(self, standard_constraints: bool=True, custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None) -> List[SummaryDoc]:
+    def query_mp(self, 
+                 standard_constraints: bool=True, 
+                 custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None
+                 ) -> List[SummaryDoc]:
         """Queries the Materials Project database for materials that follow the specified constraints.
 
         Args:
-            standard_constraints (bool, optional): If True, checks whether the material follows the standard constraints. Defaults to True.
-            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, checks whether the material follows the custom constraints. Defaults to None.
+            standard_constraints (bool, optional): If True, checks whether the material follows 
+                the standard constraints. Defaults to True.
+            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, 
+                checks whether the material follows the custom constraints. Defaults to None.
 
         Returns:
             List[SummaryDoc]: Materials Project SummaryDoc object for each material that follows the specified constraints.
@@ -135,54 +148,110 @@ class FetchMaterials:
                 "Please run `get_material_features(tag=\"train\")` from `lieme.featurize` to generate it."
             )
         filtered_results = [
-            result for result in results if self.follows_constraints(result.composition, result.structure, standard_constraints, custom_constraints)
+            result for result in results if self.follows_constraints(result.composition, result.structure, 
+                                                                     standard_constraints, custom_constraints)
         ]
         return filtered_results
-    
-    def get_m_b(self, result: SummaryDoc) -> Tuple[List[str], List[str]]:
-        """Extracts the elements, metals, and bridging elements from a material's SummaryDoc object.
 
-        Args:
-            result (SummaryDoc): Materials Project SummaryDoc object containing material information.
-
-        Returns:
-            Tuple[List[str], List[str]]: Elements, metals and bridging elements of the material.
-        """
-        elements = [str(el) for el in result.composition.elements]
-        metals = [metal for metal in elements if metal not in ["O", "S", "C", "N", "Si", "P", "F", "Li"]]
-        bridging_elements = [element for element in elements if element in ["O", "S", "C", "N", "Si", "P", "F"]]
-        return elements, metals, bridging_elements
-
-    def get_material_features(self, results: Optional[List[SummaryDoc]]=None, tag: Optional[str]=None, standard_constraints: bool=True, custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None, custom_cutoffs: Optional[dict]=None) -> pd.DataFrame:
+    def get_material_features(self, 
+                              results: Optional[List[SummaryDoc]]=None, 
+                              tag: Optional[str]=None, 
+                              standard_constraints: bool=True, 
+                              custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None, 
+                              custom_cutoffs: Optional[dict]=None, 
+                              calc: Optional[Calculator]=None, 
+                              fmax: float=0.05, 
+                              li_m_ratios: List[float]=[0.25], 
+                              mu_li: float=-2.076286119, 
+                              custom_n_m: Optional[dict]=None,
+                              sampling_size: int=30,
+                              seed: int=10,
+                              ) -> pd.DataFrame:
         """Extracts features from a list of material's SummaryDoc objects.
 
         Args:
-            results (Optional[List[SummaryDoc]], optional): List of SummaryDoc objects containing material information. Defaults to None.
-            tag (Optional[str], optional): Features are saved in a file named `material_features_{tag}.pkl` if `tag` is provided, otherwise in `material_features.pkl`. Defaults to None.
-            standard_constraints (bool, optional): If True, checks whether the material follows the standard constraints. Defaults to True.
-            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, checks whether the material follows the custom constraints. Defaults to None.
+            results (Optional[List[SummaryDoc]], optional): List of SummaryDoc objects containing 
+                material information. Defaults to None.
+            tag (Optional[str], optional): Features are saved in a file named `material_features_{tag}.pkl` 
+                if `tag` is provided, otherwise in `material_features.pkl`. Defaults to None.
+            standard_constraints (bool, optional): If True, checks whether the material follows the 
+                standard constraints. Defaults to True.
+            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, 
+                checks whether the material follows the custom constraints. Defaults to None.
             custom_cutoffs (Optional[dict], optional): Custom neighbor list cutoffs for different elements. Defaults to None.
+            calc (Calculator, optional): ASE Calculator object for intercalation calculations. Defaults to None.
+            fmax (float, optional): Maximum force criterion for relaxation. Defaults to 0.05 eV/Å.
+            li_m_ratios (List[float], optional): List of Li/M ratios for which Li intercalation features 
+                are to be calculated. Defaults to [0.25].
+            mu_li (float): The chemical potential of Li used to calculate the Li intercalation energies. 
+                Defaults to -2.076286119 eV/atom.
+            custom_n_m (Optional[dict], optional): Custom number of metal atoms present in a material. Defaults to None.
+            sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
+            seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
 
         Returns:
             pd.DataFrame: Features for all materials.
         """
         if results is None:
             results = self.query_mp(standard_constraints, custom_constraints) 
-        df = pd.DataFrame(columns=["material", "formula", "composition", "structure", "Lattice Parameter a", "Lattice Parameter b", "Lattice Parameter c", "Maximum Void Radius", "Average Li-M Distance", "Average Li-B Distance", "Average M-B Distance", "Band Gap", "Band Center", "Valence Band Center", "Conduction Band Center", "p Band Center", "Valence p Band Center", "Conduction p Band Center", "d Band Center", "Valence d Band Center", "Conduction d Band Center", "M p Band Center", "M Valence p Band Center", "M Conduction p Band Center", "M d Band Center", "M Valence d Band Center", "M Conduction d Band Center", "B p Band Center", "B Valence p Band Center", "B Conduction p Band Center"])
+        base_cols = [
+            "material", "formula", "composition", "structure",
+            "Lattice Parameter a", "Lattice Parameter b", "Lattice Parameter c",
+            "Maximum Void Radius", "Average Li-M Distance", "Average Li-B Distance", "Average M-B Distance",
+            "Band Gap", "Band Center", "Valence Band Center", "Conduction Band Center",
+            "p Band Center", "Valence p Band Center", "Conduction p Band Center",
+            "d Band Center", "Valence d Band Center", "Conduction d Band Center",
+            "M p Band Center", "M Valence p Band Center", "M Conduction p Band Center",
+            "M d Band Center", "M Valence d Band Center", "M Conduction d Band Center",
+            "B p Band Center", "B Valence p Band Center", "B Conduction p Band Center"
+        ]
+        intercalation_cols = []
+        for ratio in li_m_ratios:
+            suffix = f"@ {ratio:.2f} Li/M"
+            intercalation_cols += [
+                f"Li Intercalation Energy {suffix}",
+                f"Volume Change {suffix}",
+                f"Average Li-M Distance {suffix}",
+                f"Average Li-B Distance {suffix}",
+                f"Average M-B Distance {suffix}",
+                f"Charge on Li {suffix}",
+                f"Charge on M {suffix}",
+                f"Charge on B {suffix}",
+                f"B Valence p Band Center {suffix}",
+                f"B Conduction p Band Center {suffix}",
+            ]
+        intercalation_cols = intercalation_cols if calc else []
+        df = pd.DataFrame(columns=base_cols+intercalation_cols) 
         for result in results:
-            features = GetFeatures(str(result.material_id), use_methods_only=True)
-            max_void_radius = features.get_max_void_radius(result.structure)
+            material = str(result.material_id)
             atoms = AseAtomsAdaptor.get_atoms(result.structure)
-            lattice_parameters = list(atoms.cell.cellpar()[0:3]/atoms.get_volume())
-            _, features.metals, features.bridging_elements = self.get_m_b(result)
-            distances = features.get_li_m_b_distances(atoms, custom_cutoffs=custom_cutoffs)
+            features = GetFeatures(material=material, 
+                                   atoms=atoms, 
+                                   calc=calc, 
+                                   fmax=fmax,
+                                   )
+            relaxed_atoms = features.relaxed_atoms
+            max_void_radius = features.get_max_void_radius()
+            lattice_parameters = list(relaxed_atoms.cell.cellpar()[0:3]/relaxed_atoms.get_volume())
+            distances = features.get_li_m_b_distances(custom_cutoffs=custom_cutoffs)
             try:
                 dos_data = features.get_dos_data(dos=self.mpr.get_dos_by_material_id(result.material_id))
             except MPRestError:
                 dos_data = [0]*19
-            data = [result.material_id, result.formula_pretty, result.composition, result.structure] + lattice_parameters + [max_void_radius] + distances + dos_data
+            data = ([result.material_id, result.formula_pretty, result.composition, result.structure] 
+                    + lattice_parameters + [max_void_radius] + distances + dos_data)
+            if calc:
+                intercalation_data = features.get_intercalation_data(
+                    li_m_ratios=li_m_ratios,
+                    mu_li=mu_li,
+                    custom_n_m=custom_n_m,
+                    sampling_size=sampling_size,
+                    seed=seed
+                )
+                data = data + intercalation_data
             next_index = len(df)
             df.loc[next_index] = data
+            features.return_to_root()
         ep_feat = ElementProperty.from_preset(preset_name="magpie")
         df = ep_feat.featurize_dataframe(df, col_id="composition") 
         df_feat = DensityFeatures()

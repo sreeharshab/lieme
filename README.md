@@ -23,7 +23,7 @@ Install the latest stable build using the following command.
 pip install lieme
 ```
 
-If you want the latest developement version, clone the repo and install in editable mode.
+If you want the latest developement version with experimental functionality, clone the repo and install in editable mode.
 ```
 git clone https://github.com/sreeharshab/lieme.git
 cd lieme
@@ -54,16 +54,18 @@ material\
 
 n in n_Li is a positive integer. Site can be replaced with any custom name. An example of the directory structure is provided in the [`example`](./example/) directory.
 
-```
+```python
 from lieme.featurize import get_material_features
 
-materials = [material]
+materials = ["material"]
 x = get_material_features(materials=materials)
 ```
 
+⚠️ Experimental: For materials with missing Intercalation DFT data, features can be calculated on-the-fly by passing a custom ASE calculator `calc` to `get_material_features()`. This is mainly intended to automate the sampling of Li intercalation in the material and hence using an MLIP calculator is suggested. Make sure your Energy_calculation folder contains a POSCAR, else pass an `atoms_list` which corresponds to the `materials`. This functionality is experimental and is currently only available using `git clone`.
+
 ## Obtaining Input Features from Materials Project
 Input features can also be generated for materials in Materials Project.
-```
+```python
 from lieme.mpfetch import FetchMaterials
 
 fetcher = FetchMaterials(api_key="MATERIALS PROJECT API KEY")
@@ -72,9 +74,11 @@ x = fetcher.get_material_features()
 
 When fetching materials from Materials Project, `standard_constraints` are passed to filter results. You can add additional constraints using `custom_constraints`. `standard_constraints` can also be switched off by passing `standard_constraints=False` to `get_material_features()`.
 
+⚠️ Experimental: `calc` can be passed to `get_material_features()` to get Intercalation features.
+
 ## Machine Learning
 Machine learned models can be generated and used according to the following procedure.
-```
+```python
 from lieme.ml import MaterialsEchemRegressor
 
 regressor = MaterialsEchemRegressor()
@@ -83,12 +87,12 @@ regressor.train(job_id=10)
 ```
 
 `generate_train_jobs()` generates `jobs.pkl` which contains feature subset tuples such as `(feature_name_1, feature_name_2, feature_name_3, feature_name_4)`. For example, if the total number of features are 20, then `combinations(20,4)` which is 4845 tuples are present in `jobs.pkl`. Then, `train(job_id)` can train the model with the feature subset corresponding to the `job_id`. After training, the job_id, best model, feature subset and the cross validation score of the best model are saved to an SQLite database.
-```
+```python
 regressor.write_train_results_to_db()
 ```
 
 The performance of new materials can be predicted after training the models.
-```
+```python
 predictions = regressor.test()
 ```
 
