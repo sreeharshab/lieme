@@ -5,7 +5,7 @@ import logging
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
-from scipy.spatial import Voronoi
+from scipy.spatial import Voronoi, _qhull
 import ase
 from ase import Atoms
 from ase.io import read, Trajectory
@@ -32,6 +32,77 @@ B (b): Bridging elements
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+def get_formula_m_b(atoms: Atoms) -> Tuple[List[str], List[str]]:
+    formula = str(atoms.symbols)
+    elements = re.findall(r"([A-Z][a-z]?)\d*", formula)
+    metals = [metal for metal in elements if metal not in ["O", "S", "C", "N", "Si", "P", "F", "Li"]]
+    bridging_elements = [element for element in elements if element in ["O", "S", "C", "N", "Si", "P", "F"]]
+    return formula, metals, bridging_elements
+
+def relax(atoms: Atoms, calc: Calculator, fmax: float, trajectory: str=None) -> Atoms:
+    atoms_copy = atoms.copy()
+    atoms_copy.calc = calc
+    ucf = UnitCellFilter(atoms_copy)
+    opt = BFGS(ucf)
+    if trajectory:
+        traj = Trajectory(trajectory, "w")
+        opt.attach(traj.write, 1, atoms_copy)
+    opt.run(fmax=fmax)
+    return atoms_copy
+
+def get_relaxed_atoms_and_energy(dir_name: str="Energy_calculation", 
+                                 atoms: Atoms=None, 
+                                 calc: Calculator=None, 
+                                 fmax: float=0.05
+                                 ) -> Tuple[Atoms, float]:
+    """Retrieves the Atoms object and the corresponding energy from the specified directory. 
+        Either `OUTCAR` or `vasprun.xml` should be present in the directory.
+
+    Args:
+        dir_name (str, optional): Name of the directory. Defaults to "Energy_calculation".
+        atoms (Atoms, optional): ASE Atoms object to be relaxed if `calc` is provided. Defaults to None.
+        calc (Calculator, optional): ASE Calculator object used for atomic position relaxation. When None, 
+                only feature extraction is performed from pre-existing DFT calculations. Defaults to None.
+        fmax (float, optional): Maximum force criterion for relaxation. Defaults to 0.05 eV/Å.
+
+    Returns:
+        Tuple[Atoms, float]: Relaxed ASE Atoms object and the corresponding energy.
+    """
+    local_root = os.getcwd()
+    trajectory = f"{dir_name}/opt.traj"
+    try:
+        os.chdir(dir_name)
+        if os.path.exists("OUTCAR"):
+            relaxed_atoms = read("OUTCAR@-1")
+        elif os.path.exists("vasprun.xml"):
+            relaxed_atoms = read("vasprun.xml")
+        elif os.path.exists("opt.traj"):
+            relaxed_atoms = read("opt.traj@-1")
+        elif os.path.exists("POSCAR") and calc is not None:
+            atoms = read("POSCAR")
+            relaxed_atoms = relax(atoms=atoms, calc=calc, fmax=fmax, trajectory="opt.traj")
+        else:
+            raise IOError(f"Failed to read OUTCAR/vasprun.xml/POSCAR from `{dir_name}` at `{os.getcwd()}`.")
+        energy = relaxed_atoms.get_potential_energy()
+        return relaxed_atoms, energy
+    except FileNotFoundError:
+        if atoms is None:
+            assert self.atoms is not None, "Atoms object must be provided during "
+            f"initialization when it is not available at {dir_name}."
+            atoms = self.atoms
+        assert calc is not None, "ASE Calculator must be provided when "
+        f"Atoms object is not available at {dir_name}."
+        if os.path.exists(str(trajectory)):
+            relaxed_atoms = Trajectory(trajectory, "r")[-1]
+            energy = relaxed_atoms.get_potential_energy()
+        else:
+            os.makedirs(trajectory.rsplit("/",1)[0], exist_ok=True)
+            relaxed_atoms = relax(atoms, calc=calc, fmax=fmax, trajectory=trajectory)
+            energy = relaxed_atoms.get_potential_energy()
+        return relaxed_atoms, energy
+    finally:
+        os.chdir(local_root)
+
 class GetFeatures:
     def __init__(self, 
                  material: str, 
@@ -54,6 +125,16 @@ class GetFeatures:
         """
         self._root = os.getcwd()
         self.material = material
+        logged = False
+        if atoms is not None:
+            self.formula, self.metals, self.bridging_elements = get_formula_m_b(atoms)
+            logging.info(f"Material: {self.material}, Formula: {self.formula}")
+            logged = True
+        if atoms is not None and len(atoms)<10:
+            logging.warning(f"The provided Atoms object for {material} has less than 10 atoms. "
+                            "Repeating it to avoid errors during feature extraction.")
+            repeat = int(np.ceil(10/len(atoms)))
+            atoms = atoms*(repeat,1,1)
         self.atoms = atoms
         self.calc = calc
         self.fmax = fmax
@@ -71,78 +152,14 @@ class GetFeatures:
             os.makedirs(target_dir, exist_ok=True)
             os.chdir(target_dir)
         try:
-            self.relaxed_atoms = self.get_relaxed_atoms_and_energy(atoms=atoms)[0]
+            self.relaxed_atoms = get_relaxed_atoms_and_energy(atoms=atoms, calc=calc, fmax=fmax)[0]
         except AssertionError:   # If you pass atoms, but do not pass calc and there is no calculation folder!
             self.relaxed_atoms = atoms
-        self.formula, self.metals, self.bridging_elements = self.get_formula_m_b()
-        self.adaptor = AseAtomsAdaptor()
-        self.structure = self.adaptor.get_structure(self.relaxed_atoms)
+        if not logged:
+            self.formula, self.metals, self.bridging_elements = get_formula_m_b(self.relaxed_atoms)
+            logging.info(f"Material: {self.material}, Formula: {self.formula}")
+        self.structure = AseAtomsAdaptor.get_structure(self.relaxed_atoms)
         self.data = None
-    
-    def get_formula_m_b(self) -> Tuple[List[str], List[str]]:
-        atoms = self.relaxed_atoms
-        formula = str(atoms.symbols)
-        elements = re.findall(r"([A-Z][a-z]?)\d*", formula)
-        metals = [metal for metal in elements if metal not in ["O", "S", "C", "N", "Si", "P", "F", "Li"]]
-        bridging_elements = [element for element in elements if element in ["O", "S", "C", "N", "Si", "P", "F"]]
-        return formula, metals, bridging_elements
-    
-    def relax(self, atoms: Atoms, trajectory: str=None) -> Atoms:
-        atoms_copy = atoms.copy()
-        atoms_copy.calc = self.calc
-        ucf = UnitCellFilter(atoms_copy)
-        opt = BFGS(ucf)
-        if trajectory:
-            traj = Trajectory(trajectory, "w")
-            opt.attach(traj.write, 1, atoms_copy)
-        opt.run(fmax=self.fmax)
-        return atoms_copy
-    
-    def get_relaxed_atoms_and_energy(self, dir_name: str="Energy_calculation", atoms: Atoms=None) -> Tuple[Atoms, float]:
-        """Retrieves the Atoms object and the corresponding energy from the specified directory. 
-            Either `OUTCAR` or `vasprun.xml` should be present in the directory.
-
-        Args:
-            dir_name (str, optional): Name of the directory. Defaults to "Energy_calculation".
-            atoms (Atoms, optional): ASE Atoms object to be relaxed if `calc` is provided. Defaults to None.
-
-        Returns:
-            Tuple[Atoms, float]: Relaxed ASE Atoms object and the corresponding energy.
-        """
-        local_root = os.getcwd()
-        trajectory = f"{dir_name}/opt.traj"
-        try:
-            os.chdir(dir_name)
-            if os.path.exists("OUTCAR"):
-                relaxed_atoms = read("OUTCAR@-1")
-            elif os.path.exists("vasprun.xml"):
-                relaxed_atoms = read("vasprun.xml")
-            elif os.path.exists("opt.traj"):
-                relaxed_atoms = read("opt.traj@-1")
-            elif os.path.exists("POSCAR") and self.calc is not None:
-                atoms = read("POSCAR")
-                relaxed_atoms = self.relax(atoms=atoms, trajectory="opt.traj")
-            else:
-                raise IOError(f"Failed to read OUTCAR/vasprun.xml/POSCAR from `{dir_name}` at `{os.getcwd()}`.")
-            energy = relaxed_atoms.get_potential_energy()
-            return relaxed_atoms, energy
-        except FileNotFoundError:
-            if atoms is None:
-                assert self.atoms is not None, "Atoms object must be provided during "
-                f"initialization when it is not available at {dir_name}."
-                atoms = self.atoms
-            assert self.calc is not None, "ASE Calculator must be provided when "
-            f"Atoms object is not available at {dir_name}."
-            if os.path.exists(str(trajectory)):
-                relaxed_atoms = Trajectory(trajectory, "r")[-1]
-                energy = relaxed_atoms.get_potential_energy()
-            else:
-                os.makedirs(trajectory.rsplit("/",1)[0], exist_ok=True)
-                relaxed_atoms = self.relax(atoms, trajectory=trajectory)
-                energy = relaxed_atoms.get_potential_energy()
-            return relaxed_atoms, energy
-        finally:
-            os.chdir(local_root)
     
     def get_voronoi_polyhedra_and_voronoi(self, structure: Structure, index: int, vnn: VoronoiNN) -> Tuple[dict, Voronoi]:
         """Adaptation of the VoronoiNN method from pymatgen. This is an internal method.
@@ -460,7 +477,7 @@ class GetFeatures:
                 for site in sites:
                     os.chdir(f"{site}")
                     try:
-                        atoms_with_li, energy_with_li = self.get_relaxed_atoms_and_energy(dir_name="geo_opt")
+                        atoms_with_li, energy_with_li = get_relaxed_atoms_and_energy(dir_name="geo_opt")
                     except (FileNotFoundError, OSError):
                         os.chdir("../")
                         continue
@@ -496,7 +513,6 @@ class GetFeatures:
             assert self.calc is not None, "ASE Calculator object must be provided when `Intercalation` directory is not complete."
             data = {}
             for ratio in li_m_ratios:
-                self.return_to_root()
                 intercalate = Intercalation(material=self.material, 
                                             atoms=atoms, 
                                             calc=self.calc, 
@@ -542,7 +558,6 @@ class GetFeatures:
         Returns:
             List[float]: Extracted features.
         """
-        logging.info(f"Material: {self.material}, Formula: {self.formula}")
         self.lattice_parameters = list(self.relaxed_atoms.cell.cellpar()[0:3]/self.relaxed_atoms.get_volume())
         self.max_void_radius = self.get_max_void_radius()
         self.distances = self.get_li_m_b_distances(atoms=self.relaxed_atoms, custom_cutoffs=custom_cutoffs)
@@ -669,7 +684,7 @@ def get_material_features(materials: List[str],
     df.to_pickle(file_name)
     return df
 
-class Intercalation(GetFeatures):
+class Intercalation:
     def __init__(self, 
                  material: str, 
                  atoms: Atoms, 
@@ -680,7 +695,10 @@ class Intercalation(GetFeatures):
                  sampling_size: int=30,
                  seed: int=10
                  ):
-        super().__init__(material=material, atoms=atoms, calc=calc, fmax=fmax)
+        self.material = material
+        self.atoms = atoms
+        self.calc = calc
+        self.fmax = fmax
         self.li_m_ratio = li_m_ratio
         self.custom_n_m = custom_n_m
         self.sampling_size = sampling_size
@@ -691,17 +709,20 @@ class Intercalation(GetFeatures):
             np.random.seed(self.seed)
         li_structures = []
         atoms = self.atoms
-        structure = self.adaptor.get_structure(atoms)
+        structure = AseAtomsAdaptor.get_structure(atoms)
         custom_n_m = self.custom_n_m
         if custom_n_m is None:
             custom_n_m = {"Li7NbS2": 8}
         try:
             n_m = custom_n_m[self.material]
         except (KeyError, TypeError):
-            _, metals, _ = super().get_formula_m_b()
+            _, metals, _ = get_formula_m_b(atoms)
             n_m = sum(1 for atom in atoms if atom.symbol in metals)
         coords = np.array([site.coords for site in structure.sites])
-        voro = Voronoi(coords)
+        try:
+            voro = Voronoi(coords)
+        except _qhull.QhullError:
+            voro = Voronoi(coords, qhull_options="QJ")
         frac_sites = []
         for v in voro.vertices:
             f = structure.lattice.get_fractional_coords(v)
@@ -764,9 +785,12 @@ class Intercalation(GetFeatures):
             atoms_with_li = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=True)
             n_li = sum(1 for atom in atoms_with_li if atom.symbol=="Li")
             relax_dir = f"Intercalation/{n_li}_Li/{index}/geo_opt"
-            atoms_with_li, energy_with_li = super().get_relaxed_atoms_and_energy(
-                atoms=atoms_with_li, 
-                dir_name=relax_dir)
+            atoms_with_li, energy_with_li = get_relaxed_atoms_and_energy( 
+                dir_name=relax_dir,
+                atoms=atoms_with_li,
+                calc=self.calc,
+                fmax=self.fmax
+                )
             atoms_list_with_li.append(atoms_with_li)
             energies_with_li.append(energy_with_li)
             traj.write(atoms_with_li)
