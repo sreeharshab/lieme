@@ -783,7 +783,7 @@ class Intercalation:
             symbols = [site.specie.symbol for site in structure_with_li.sites]
             cell = structure_with_li.lattice.matrix
             atoms_with_li = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=True)
-            n_li = sum(1 for atom in atoms_with_li if atom.symbol=="Li")
+            n_li = sum(1 for atom in atoms_with_li if atom.symbol=="Li") - sum(1 for atom in self.atoms if atom.symbol=="Li")
             relax_dir = f"Intercalation/{n_li}_Li/{index}/geo_opt"
             atoms_with_li, energy_with_li = get_relaxed_atoms_and_energy( 
                 dir_name=relax_dir,

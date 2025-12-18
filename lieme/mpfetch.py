@@ -1,10 +1,17 @@
+import warnings
+import contextlib
+import io
+from tqdm import tqdm
 from collections import Counter
 from typing import List, Tuple, Callable, Dict, Optional
 import pandas as pd
+from ase import Atoms
 from ase.calculators.calculator import Calculator
 from mp_api.client import MPRester
 from mp_api.client.core.client import MPRestError
 from emmet.core.summary import SummaryDoc
+from jarvis.db.figshare import data
+from jarvis.core.atoms import Atoms as JarvisAtoms
 from pymatgen.core.structure import Composition, Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.io.ase import AseAtomsAdaptor
@@ -12,18 +19,59 @@ from matminer.featurizers.structure import DensityFeatures, MaximumPackingEffici
 from matminer.featurizers.composition import ElementProperty
 from lieme.featurize import GetFeatures
 
+class Material:
+    def __init__(self, material_id: str, atoms: Atoms=None, structure: Structure=None, **kwargs):
+        self.material_id = material_id
+        self.atoms = atoms
+        self.structure = structure
+        if structure is None and atoms is not None:
+            self.structure = AseAtomsAdaptor.get_structure(atoms)
+        elif atoms is None and structure is not None:
+            self.atoms = AseAtomsAdaptor.get_atoms(structure)
+        else:
+            raise ValueError("Either atoms or structure must be provided.")
+        if kwargs.get("composition", None):
+            self.composition = kwargs["composition"]
+        else:
+            self.composition = structure.composition
+        if kwargs.get("formula_pretty", None):
+            self.formula_pretty = kwargs["formula_pretty"]
+        else:
+            self.formula_pretty = self.composition.reduced_formula
+        self.dos = kwargs.get("dos", None)
+        self.band_gap = kwargs.get("band_gap", None)
+    
+    def __str__(self):
+        return (f"Material ID: {self.material_id}\n"
+                f"Formula: {self.formula_pretty}\n"
+                f"Structure: {self.structure}\n"
+                )
+    
+    def __repr__(self):
+        return self.__str__()
+
 class FetchMaterials:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, jarvis_json: str=None):
         """Initialize the FetchMaterials class to fetch relevant materials from the Materials Project database.
 
         Args:
             api_key (str): API key to access the Materials Project database.
+            jarvis_json (str, optional): Path to the Jarvis JSON file. Defaults to None.
         """
         self.api_key = api_key
+        self.jarvis_json = jarvis_json
         self.mpr = MPRester(api_key)
         self.composition_space = None
         self.structure_space = None
-        self.df_train = None
+        try:
+            self.df_train = pd.read_pickle("material_features_train.pkl")
+        except:
+            warnings.warn("The file material_features_train.pkl does not exist.\n"
+                          "Please run `get_material_features(tag=\"train\")` from" 
+                          "`lieme.featurize` to generate it.\nOr switch standard_constraints "
+                          "to False while querying materials.",
+                          UserWarning
+            )
    
     def get_composition_space(self) -> List[str]:
         """Provides the composition space of the training data.
@@ -140,17 +188,60 @@ class FetchMaterials:
             num_chunks=None,
             chunk_size=1000
         )
-        try:
-            self.df_train = pd.read_pickle("material_features_train.pkl")
-        except:
-            raise FileNotFoundError(
-                "The file material_features_train.pkl does not exist.\n"
-                "Please run `get_material_features(tag=\"train\")` from `lieme.featurize` to generate it."
+        filtered_results = []
+        for result in tqdm(results, desc="Filtering MP materials"):
+            if self.follows_constraints(result.composition, result.structure, 
+                                        standard_constraints, custom_constraints):
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                        dos = self.mpr.get_dos_by_material_id(result.material_id)
+                except MPRestError:
+                    dos = [0]*19
+                new_result = Material(
+                    material_id=result.material_id,
+                    structure=result.structure,
+                    composition=result.composition,
+                    formula_pretty=result.formula_pretty,
+                    dos = dos,
+                    band_gap=result.band_gap
+                )
+                filtered_results.append(new_result)
+        return filtered_results
+    
+    def query_jarvis(self,
+                      standard_constraints: bool=True,
+                      custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None
+                      ) -> List[SummaryDoc]:
+        """Queries the Jarvis database for materials that follow the specified constraints.
+        Args:
+            standard_constraints (bool, optional): If True, checks whether the material follows
+                the standard constraints. Defaults to True.
+            custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None,
+                checks whether the material follows the custom constraints. Defaults to None.
+        
+        Returns:
+            List[SummaryDoc]: Jarvis SummaryDoc object for each material that follows the specified constraints
+        """
+        if self.jarvis_json:
+            dft_3d = data("dft_3d", store_dir=self.jarvis_json)
+        elif not self.jarvis_json:
+            try:
+                dft_3d = data("dft_3d")
+            except Exception as e:
+                warnings.warn(f"Could not load JARVIS data.\n{e}", UserWarning)
+                return []
+        dft_3d = {entry["jid"]: entry for entry in dft_3d}
+        filtered_results = []
+        for jid, entry in tqdm(dft_3d.items(), desc="Filtering Jarvis materials"):
+            structure = JarvisAtoms.from_dict(entry["atoms"]).pymatgen_converter()
+            result = Material(
+                material_id=jid,
+                structure=structure,
+                band_gap=entry.get("optb88vdw_bandgap", None)
             )
-        filtered_results = [
-            result for result in results if self.follows_constraints(result.composition, result.structure, 
-                                                                     standard_constraints, custom_constraints)
-        ]
+            if self.follows_constraints(result.composition, result.structure,
+                                        standard_constraints, custom_constraints):
+                filtered_results.append(result)
         return filtered_results
 
     def get_material_features(self, 
@@ -193,7 +284,12 @@ class FetchMaterials:
             pd.DataFrame: Features for all materials.
         """
         if results is None:
-            results = self.query_mp(standard_constraints, custom_constraints) 
+            results_mp = self.query_mp(standard_constraints, custom_constraints)
+            try:
+                results_jarvis = self.query_jarvis(standard_constraints, custom_constraints)
+            except:
+                results_jarvis = []
+            results = results_mp + results_jarvis
         base_cols = [
             "material", "formula", "composition", "structure",
             "Lattice Parameter a", "Lattice Parameter b", "Lattice Parameter c",
@@ -224,7 +320,7 @@ class FetchMaterials:
         df = pd.DataFrame(columns=base_cols+intercalation_cols) 
         for result in results:
             material = str(result.material_id)
-            atoms = AseAtomsAdaptor.get_atoms(result.structure)
+            atoms = result.atoms
             features = GetFeatures(material=material, 
                                    atoms=atoms, 
                                    calc=calc, 
@@ -235,11 +331,11 @@ class FetchMaterials:
             lattice_parameters = list(relaxed_atoms.cell.cellpar()[0:3]/relaxed_atoms.get_volume())
             distances = features.get_li_m_b_distances(custom_cutoffs=custom_cutoffs)
             try:
-                dos_data = features.get_dos_data(dos=self.mpr.get_dos_by_material_id(result.material_id))
+                dos_data = features.get_dos_data(dos=result.dos)
             except MPRestError:
                 dos_data = [0]*19
             data = ([result.material_id, result.formula_pretty, result.composition, result.structure] 
-                    + lattice_parameters + [max_void_radius] + distances + dos_data)
+                    + lattice_parameters + [max_void_radius] + distances + [result.band_gap] + dos_data[1:])
             if calc:
                 intercalation_data = features.get_intercalation_data(
                     li_m_ratios=li_m_ratios,

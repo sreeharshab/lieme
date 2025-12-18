@@ -31,6 +31,7 @@ setup(
         "pymatgen>=2025.1.9",
         "matminer>=0.9.3",
         "mp-api>=0.45.3",
+        "jarvis-tools>=2025.5.30",
         "openpyxl",
     ],
     extras_require={
