@@ -12,6 +12,7 @@ from mp_api.client.core.client import MPRestError
 from emmet.core.summary import SummaryDoc
 from jarvis.db.figshare import data
 from jarvis.core.atoms import Atoms as JarvisAtoms
+from qmpy_rester import QMPYRester
 from pymatgen.core.structure import Composition, Structure
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from pymatgen.io.ase import AseAtomsAdaptor
@@ -61,6 +62,7 @@ class FetchMaterials:
         self.api_key = api_key
         self.jarvis_json = jarvis_json
         self.mpr = MPRester(api_key)
+        self.qmpyr = QMPYRester()
         self.composition_space = None
         self.structure_space = None
         try:
@@ -167,7 +169,7 @@ class FetchMaterials:
     def query_mp(self, 
                  standard_constraints: bool=True, 
                  custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None
-                 ) -> List[SummaryDoc]:
+                 ) -> List[Material]:
         """Queries the Materials Project database for materials that follow the specified constraints.
 
         Args:
@@ -177,7 +179,7 @@ class FetchMaterials:
                 checks whether the material follows the custom constraints. Defaults to None.
 
         Returns:
-            List[SummaryDoc]: Materials Project SummaryDoc object for each material that follows the specified constraints.
+            List[Material]: Material object for each material that follows the specified constraints.
         """
         results = self.mpr.materials.summary.search(
             theoretical=False,
@@ -211,7 +213,7 @@ class FetchMaterials:
     def query_jarvis(self,
                       standard_constraints: bool=True,
                       custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None
-                      ) -> List[SummaryDoc]:
+                      ) -> List[Material]:
         """Queries the Jarvis database for materials that follow the specified constraints.
         Args:
             standard_constraints (bool, optional): If True, checks whether the material follows
@@ -220,7 +222,7 @@ class FetchMaterials:
                 checks whether the material follows the custom constraints. Defaults to None.
         
         Returns:
-            List[SummaryDoc]: Jarvis SummaryDoc object for each material that follows the specified constraints
+            List[Material]: Material object for each material that follows the specified constraints
         """
         if self.jarvis_json:
             dft_3d = data("dft_3d", store_dir=self.jarvis_json)
@@ -243,6 +245,48 @@ class FetchMaterials:
                                         standard_constraints, custom_constraints):
                 filtered_results.append(result)
         return filtered_results
+    
+    def query_oqmd(self,
+                   standard_constraints: bool=True,
+                   custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None
+                   ) -> List[Material]:
+        entries = []
+        chunk_size = 500
+        offset = 0
+        pbar = tqdm(desc="Fetching OQMD materials")
+        while True:
+            kwargs = {
+                "stability": "<0.1",
+                "limit": chunk_size,
+                "offset": offset
+            }
+            phases = self.qmpyr.get_oqmd_phases(verbose=False, **kwargs)
+            if not phases:
+                break
+            entries.extend(phases["data"])
+            pbar.update(1)
+            offset += chunk_size
+        pbar.close()
+        filtered_results = []
+        for entry in tqdm(entries, desc="Filtering OQMD materials"):
+            lattice = entry["unit_cell"]
+            sites = entry["sites"]
+            species = []
+            coords = []
+            for site in sites:
+                parts = site.split(" @ ")
+                species.append(parts[0])
+                coords.append([float(x) for x in parts[1].split()])
+            structure = Structure(lattice, species, coords)
+            result = Material(
+                material_id=entry["entry_id"],
+                structure=structure,
+                band_gap=entry.get("band_gap", None)
+            )
+            if self.follows_constraints(result.composition, result.structure,
+                                        standard_constraints, custom_constraints):
+                filtered_results.append(result)
+        return filtered_results
 
     def get_material_features(self, 
                               results: Optional[List[SummaryDoc]]=None, 
@@ -257,6 +301,8 @@ class FetchMaterials:
                               custom_n_m: Optional[dict]=None,
                               sampling_size: int=30,
                               seed: int=10,
+                              li_atom_cutoff: float=1.7,
+                              li_li_cutoff: float=1.0
                               ) -> pd.DataFrame:
         """Extracts features from a list of material's SummaryDoc objects.
 
@@ -279,6 +325,8 @@ class FetchMaterials:
             custom_n_m (Optional[dict], optional): Custom number of metal atoms present in a material. Defaults to None.
             sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
             seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
+            li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
+            li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
 
         Returns:
             pd.DataFrame: Features for all materials.
@@ -289,7 +337,11 @@ class FetchMaterials:
                 results_jarvis = self.query_jarvis(standard_constraints, custom_constraints)
             except:
                 results_jarvis = []
-            results = results_mp + results_jarvis
+            try:
+                results_oqmd = self.query_oqmd(standard_constraints, custom_constraints)
+            except:
+                results_oqmd = []
+            results = results_mp + results_jarvis + results_oqmd
         base_cols = [
             "material", "formula", "composition", "structure",
             "Lattice Parameter a", "Lattice Parameter b", "Lattice Parameter c",
@@ -342,7 +394,9 @@ class FetchMaterials:
                     mu_li=mu_li,
                     custom_n_m=custom_n_m,
                     sampling_size=sampling_size,
-                    seed=seed
+                    seed=seed,
+                    li_atom_cutoff=li_atom_cutoff,
+                    li_li_cutoff=li_li_cutoff
                 )
                 data = data + intercalation_data
             next_index = len(df)

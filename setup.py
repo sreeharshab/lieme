@@ -32,6 +32,7 @@ setup(
         "matminer>=0.9.3",
         "mp-api>=0.45.3",
         "jarvis-tools>=2025.5.30",
+        "qmpy-rester>=0.2.0",
         "openpyxl",
     ],
     extras_require={
