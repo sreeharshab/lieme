@@ -20,6 +20,7 @@ from pymatgen.core import Structure
 from pymatgen.electronic_structure.core import OrbitalType, Spin
 from pymatgen.electronic_structure.dos import CompleteDos
 from pymatgen.analysis.local_env import VoronoiNN
+from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.io.ase import AseAtomsAdaptor
 from pymatgen.io.vasp import Vasprun
 from lieme.io import DOS, get_atoms_with_charges
@@ -87,9 +88,8 @@ def get_relaxed_atoms_and_energy(dir_name: str="Energy_calculation",
         return relaxed_atoms, energy
     except FileNotFoundError:
         if atoms is None:
-            assert self.atoms is not None, "Atoms object must be provided during "
+            assert atoms is not None, "Atoms object must be provided during "
             f"initialization when it is not available at {dir_name}."
-            atoms = self.atoms
         assert calc is not None, "ASE Calculator must be provided when "
         f"Atoms object is not available at {dir_name}."
         if os.path.exists(str(trajectory)):
@@ -155,9 +155,12 @@ class GetFeatures:
             self.relaxed_atoms = get_relaxed_atoms_and_energy(atoms=atoms, calc=calc, fmax=fmax)[0]
         except AssertionError:   # If you pass atoms, but do not pass calc and there is no calculation folder!
             self.relaxed_atoms = atoms
-        if not logged:
+        if not logged and self.relaxed_atoms is not None:
             self.formula, self.metals, self.bridging_elements = get_formula_m_b(self.relaxed_atoms)
             logging.info(f"Material: {self.material}, Formula: {self.formula}")
+        elif self.relaxed_atoms is None:
+            raise ValueError("Relaxed Atoms object could not be obtained. Either "
+            "`Energy_calculation` directory is missing or calc is not provided.")
         self.structure = AseAtomsAdaptor.get_structure(self.relaxed_atoms)
         self.data = None
     
@@ -403,6 +406,9 @@ class GetFeatures:
         """
         volume_with_li = atoms_with_li.get_volume()
         n_li = sum(1 for atom in atoms_with_li if atom.symbol=="Li") - sum(1 for atom in atoms if atom.symbol=="Li")
+        if n_li==0:
+            logging.warning("Number of intercalated Li atoms is zero. Taking intercalation values as 0...")
+            return [0]*10
         li_energy = round((energy_with_li-energy-n_li*mu_li)/(n_li),3)
         volume_change = (volume_with_li - volume)/volume
         li_m_b_distances = self.get_li_m_b_distances(atoms=atoms_with_li)
@@ -416,7 +422,9 @@ class GetFeatures:
                                custom_n_m: Optional[dict]=None,
                                sampling_size: int=30,
                                seed: int=10,
-                               fhandle: Optional[IO]=None,
+                               li_atom_cutoff: float=1.7,
+                               li_li_cutoff: float=1.0,
+                               fhandle: Optional[IO]=None
                                ) -> List[float]:
         """Calculates the Li intercalation related properties for the material.
 
@@ -429,6 +437,8 @@ class GetFeatures:
                 in a material. Defaults to {"Li7NbS2": 8}.
             sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
             seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
+            li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
+            li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
             fhandle (Optional[IO], optional): File handle to write the Li intercalation data. Defaults to None.
         
         Returns:
@@ -520,7 +530,9 @@ class GetFeatures:
                                             li_m_ratio=ratio, 
                                             custom_n_m=custom_n_m, 
                                             sampling_size=sampling_size, 
-                                            seed=seed
+                                            seed=seed,
+                                            li_atom_cutoff=li_atom_cutoff,
+                                            li_li_cutoff=li_li_cutoff
                                             )
                 atoms_with_li, energy_with_li = intercalate.get_best_intercalated_structure()
                 if atoms_with_li is None:
@@ -538,6 +550,8 @@ class GetFeatures:
                  custom_n_m: Optional[dict]=None,
                  sampling_size: int=30,
                  seed: int=10,
+                 li_atom_cutoff: float=1.7,
+                 li_li_cutoff: float=1.0,
                  fhandle: Optional[IO]=None,
                  ) -> List[float]:
         """Returns the extracted features as a list.
@@ -553,6 +567,8 @@ class GetFeatures:
                 a material. Defaults to None.
             sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
             seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
+            li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
+            li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
             fhandle (Optional[IO], optional): File handle to write the Li intercalation data. Defaults to None.
 
         Returns:
@@ -573,6 +589,8 @@ class GetFeatures:
                                                               custom_n_m=custom_n_m,
                                                               sampling_size=sampling_size,
                                                               seed=seed,
+                                                              li_atom_cutoff=li_atom_cutoff,
+                                                              li_li_cutoff=li_li_cutoff,
                                                               fhandle=fhandle,
                                                               )
         if self.intercalation_data==[0]*10*len(li_m_ratios):
@@ -600,7 +618,9 @@ def get_material_features(materials: List[str],
                           mu_li: float=-2.076286119,
                           custom_n_m: Optional[dict]=None,
                           sampling_size: int=30,
-                          seed: int=10
+                          seed: int=10,
+                          li_atom_cutoff: float=1.7,
+                          li_li_cutoff: float=1.0
                           ) -> DataFrame:
     """Extracts features for a list of materials using the GetFeatures class.
 
@@ -625,6 +645,10 @@ def get_material_features(materials: List[str],
         mu_li (float, optional): The chemical potential of Li used to calculate the Li 
             intercalation energies. Defaults to -2.076286119 eV/atom.
         custom_n_m (Optional[dict], optional): Custom number of metal atoms present in a material. Defaults to None.
+        sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
+        seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
+        li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
+        li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
         
     Returns:
         DataFrame: Features for all materials.
@@ -668,6 +692,8 @@ def get_material_features(materials: List[str],
             custom_n_m=custom_n_m,
             sampling_size=sampling_size,
             seed=seed,
+            li_atom_cutoff=li_atom_cutoff,
+            li_li_cutoff=li_li_cutoff,
             fhandle=fhandle
         )
         next_index = len(df)
@@ -693,7 +719,9 @@ class Intercalation:
                  li_m_ratio: float,
                  custom_n_m: Optional[dict]=None,
                  sampling_size: int=30,
-                 seed: int=10
+                 seed: int=10,
+                 li_atom_cutoff: float=1.7,
+                 li_li_cutoff: float=1.0
                  ):
         self.material = material
         self.atoms = atoms
@@ -703,8 +731,12 @@ class Intercalation:
         self.custom_n_m = custom_n_m
         self.sampling_size = sampling_size
         self.seed = seed
+        self.li_atom_cutoff = li_atom_cutoff
+        self.li_li_cutoff = li_li_cutoff
 
     def generate_intercalated_structures(self) -> List[Structure]:
+        li_m_ratio = self.li_m_ratio
+        sampling_size = self.sampling_size
         if self.seed is not None:    
             np.random.seed(self.seed)
         li_structures = []
@@ -731,35 +763,47 @@ class Intercalation:
         def is_valid(frac_site):
             c = structure.lattice.get_cartesian_coords(frac_site)
             dists = [np.linalg.norm(c - site.coords) for site in structure.sites]
-            return all(dist>1.7 for dist in dists)
+            return all(dist>self.li_atom_cutoff for dist in dists)
         def filter_valid_sites(frac_sites):
             valid_sites = []
             for frac_site in frac_sites:
                 if not is_valid(frac_site):
                     continue
                 c = structure.lattice.get_cartesian_coords(frac_site)
-                if not valid_sites or all(np.linalg.norm(c - structure.lattice.get_cartesian_coords(vs))>1.0 
+                if not valid_sites or all(np.linalg.norm(c - structure.lattice.get_cartesian_coords(vs))>self.li_li_cutoff
                                           for vs in valid_sites):
                     valid_sites.append(frac_site)
             return valid_sites
         valid_sites = filter_valid_sites(frac_sites)
-        n_li = max(1, int(round(self.li_m_ratio*n_m)))
-        for _ in range(self.sampling_size):
-            if n_li > len(valid_sites):
-                logging.info(f"Not enough interstitial sites for Li/M={self.li_m_ratio}, returning None!")
+        n_li = max(1, int(round(li_m_ratio*n_m)))
+        count = 0
+        matcher = StructureMatcher()
+        for _ in range(sampling_size):
+            if n_li>len(valid_sites):
+                logging.info(f"Not enough interstitial sites for Li/M={li_m_ratio}, returning None!")
                 return
             idxs = np.random.choice(len(valid_sites), n_li, replace=False)
             li_structure = structure.copy()
             for idx in idxs:
                 li_structure.append("Li", valid_sites[idx])
-            li_structures.append(li_structure)
+            if count>0:
+                is_different = not any(matcher.fit(li_structure, existing_structure) 
+                                   for existing_structure in li_structures)
+                if is_different:
+                    li_structures.append(li_structure)
+                    count+=1
+            else:
+                li_structures.append(li_structure)
+                count+=1
+        logging.info(f"Generated {count} unique intercalated structures for Li/M={li_m_ratio}...")
         return li_structures
     
     def get_best_intercalated_structure(self) -> Structure:
+        li_m_ratio = self.li_m_ratio
         dir = "Intercalation"
-        traj_path = f"{dir}/sampling_{self.li_m_ratio}.traj"
+        traj_path = f"{dir}/sampling_{li_m_ratio}.traj"
         os.makedirs(dir, exist_ok=True)
-        if os.path.exists(f"{dir}/sampling_{self.li_m_ratio}.traj"):
+        if os.path.exists(f"{dir}/sampling_{li_m_ratio}.traj"):
             try:
                 traj_read = Trajectory(traj_path, "r")
             except ase.io.ulm.InvalidULMFileError:
@@ -767,7 +811,7 @@ class Intercalation:
             mode = "a"
         else:
             mode = "w"
-        traj = Trajectory(f"{dir}/sampling_{self.li_m_ratio}.traj", mode)
+        traj = Trajectory(f"{dir}/sampling_{li_m_ratio}.traj", mode)
         structures_with_li = self.generate_intercalated_structures()
         atoms_list_with_li = []
         energies_with_li = []
