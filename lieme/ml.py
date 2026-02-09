@@ -51,7 +51,9 @@ class MaterialsEchemRegressor:
                         excluded_materials: List[str]=["MoS2","VO2-M","VO2-R"],
                         max_correlation_allowed: float=0.8,
                         pca_n_components: int=2,
-                        pca_n_features: int=33
+                        pca_n_features: int=33,
+                        scale_x: bool=False,
+                        scale_y: bool=False
                         ) -> Tuple[DataFrame, DataFrame]:
         """Preprocesses the material features and electrochemical performance data.
 
@@ -63,6 +65,8 @@ class MaterialsEchemRegressor:
             max_correlation_allowed (float, optional): Correlation cutoff to omit highly correlated features. Defaults to 0.8.
             pca_n_components (int, optional): Number of components in the PCA analysis. Defaults to 2.
             pca_n_features (int, optional): Number of top features to be considered according to PCA. Defaults to 33.
+            scale_x (bool, optional): If True, scales `x` using StandardScaler. Defaults to False.
+            scale_y (bool, optional): If True, scales `y` using StandardScaler. Defaults to False.
 
         Returns:
             Tuple[DataFrame, DataFrame]: Processed `x` and `y` which can be used to train the models.
@@ -97,9 +101,8 @@ class MaterialsEchemRegressor:
         feature2 = high_corr_pairs["Feature2"].values
 
         x = x.drop(columns=np.unique(feature2))
-        x_arr = x.values
         scaler = StandardScaler()
-        x_scaled = scaler.fit_transform(x_arr)
+        x_scaled = scaler.fit_transform(x)
 
         pca = PCA(n_components=pca_n_components)
         pca.fit(x_scaled)
@@ -108,23 +111,41 @@ class MaterialsEchemRegressor:
         feature_importance = np.dot(loadings, explained_variance_ratio)
         feature_ranking_indices = np.argsort(-feature_importance)
         selected_features_pca = x.columns[feature_ranking_indices].values
-        x = x[selected_features_pca[0:pca_n_features]]
+        if scale_x:
+            with open("scale_x.pkl", "wb") as f:
+                pickle.dump((scaler.mean_, scaler.scale_), f)
+            x_scaled = pd.DataFrame(x_scaled, columns=x.columns)
+            x = x_scaled[selected_features_pca[0:pca_n_features]]
+        else:
+            x = x[selected_features_pca[0:pca_n_features]]
         file_name = f"x_{tag}.pkl" if tag else "x.pkl"
         x.to_pickle(file_name)
 
-        if y is None and os.path.exists("exp_data.xlsx"):
+        target_property = self.target_property
+        if y is None and os.path.exists("y.pkl"):
+            y = pd.read_pickle("y.pkl")
+        elif y is None and os.path.exists("exp_data.xlsx"):
             y = pd.read_excel("exp_data.xlsx", header=0)
+            y = y[["System", "Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
+            y = y.set_index("System")
+            y = y.loc[materials, ["Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
+            y = y[[material not in excluded_materials for material in materials]]
+            if target_property == "capacity_ratio":
+                y[target_property] = (y["Rev. Cap at 0.1C, mAh/g"].values - y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
+            elif target_property.startswith("capacity@"):
+                c_rate = target_property.split("@")[1].upper()
+                y[target_property] = y[f"Rev. Cap at {c_rate}, mAh/g"].values
+            y = y[target_property]
+            if scale_y:
+                y_scaled = scaler.fit_transform(y)
+                with open("scale_y.pkl", "wb"):
+                    pickle.dump((scaler.mean_, scaler.scale_), f)
+                y = pd.Series(y_scaled.flatten(), name=y.name, index=y.index)
+            file_name = f"y_{tag}.pkl" if tag else "y.pkl"
+            y.to_pickle(file_name)
         elif y is None and not os.path.exists("exp_data.xlsx"):
-            logging.info("`y` is not provided and `exp_data.xlsx` does not exist. Returning `x` only...")
+            logging.info("`y` is not provided and `y.pkl` or `exp_data.xlsx` does not exist. Returning `x` only...")
             return x, None
-        y = y[["System", "Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
-        y = y.set_index("System")
-        y = y.loc[materials, ["Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
-        y = y[[material not in excluded_materials for material in materials]]
-        y[self.target_property] = (y["Rev. Cap at 0.1C, mAh/g"].values - y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
-        y = y[self.target_property]
-        file_name = f"y_{tag}.pkl" if tag else "y.pkl"
-        y.to_pickle(file_name)
 
         return x, y
     
@@ -488,7 +509,10 @@ class MaterialsEchemRegressor:
     def test(self,
              x_test: Optional[DataFrame]=None,
              cv_score_cutoff: float=0.5,
-             excluded_features: Optional[List[str]]=None
+             excluded_features: Optional[List[str]]=None,
+             meta_model: Optional[Pipeline]=None,
+             scale_x: bool=False,
+             inverse_transform_y: bool=False
              ) -> DataFrame:
         """Tests the trained models. The test is done using the top models based on the cross-validation score.
 
@@ -496,6 +520,9 @@ class MaterialsEchemRegressor:
             x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be present in the working directory. Defaults to None.
             cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
             excluded_features (Optional[List[str]], optional): All models which contain the excluded features are not used to test. Defaults to None.
+            meta_model (Optional[Pipeline], optional): If provided, a stacking regressor is built using the top models as base models and `meta_model` as the final estimator. Defaults to None.
+            scale_x (bool, optional): If True, scales `x_test` using the scaling parameters saved during preprocessing. Defaults to False.
+            inverse_transform_y (bool, optional): If True, inverse transforms the predicted target property using the scaling parameters saved during preprocessing. Defaults to False.
 
         Returns:
             DataFrame: Average predictions from the top models for all materials in `x_test`.
@@ -508,11 +535,21 @@ class MaterialsEchemRegressor:
                 raise FileNotFoundError(
                 f"`x_test` is not provided and `x_test.pkl` does not exist.\n"
             )
+        if scale_x:
+            try:
+                f = open("scale_x.pkl", "rb")
+                stats = pickle.load(f)
+                f.close()
+                x_test_scaled = (x_test - stats[0])/stats[1]
+                x_test = x_test_scaled
+            except FileNotFoundError:
+                logging.warning(f"`scale_x` is `True`, however, `scale_x.pkl` is not found. Using unscaled `x_test` for testing!")
         materials = x_test["material"]
         compositions = x_test["composition"]
         metadata = self.metadata
         top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
         predictions = []
+        base_models = []
         n_models_used = 0
         for _, row in top_models_info.iterrows():
             job_id = row["job_id"]
@@ -526,17 +563,42 @@ class MaterialsEchemRegressor:
                 logging.info(f"Features {features} not found in `x_test`. Skipping test using model {job_id}.")
                 continue
             try:
-                pipeline = self.models[job_id]
-                prediction = pipeline.predict(x_test_subset.values)
-                predictions.append(prediction)
+                model = self.models[job_id]
+                if meta_model is None:
+                    prediction = model.predict(x_test_subset.values)
+                    predictions.append(prediction)
+                else:
+                    preprocessor = ColumnTransformer(
+                        transformers=[("selector", "passthrough", list(features))],
+                        remainder="drop"
+                    )
+                    name = f"model_{job_id}"
+                    base_models.append(name, Pipeline([("preprocessor", preprocessor), ("regressor", model)]))
             except Exception as e:
                 logging.error(f"Skipping test using model {job_id} due to the following error.\n{e}")
-        avg_predictions = np.mean(predictions, axis=0)
+        if meta_model is None:
+            avg_predictions = np.mean(predictions, axis=0)
+        else:
+            stacking_regressor = StackingRegressor(
+                estimators=base_models,
+                final_estimator=meta_model,
+                cv=5
+            )
+            stacking_regressor.fit(x_train, y_train)
+            avg_predictions = stacking_regressor.predict(x_test)
         avg_predictions = pd.DataFrame({
             "material": materials,
             "composition": compositions,
             self.target_property: avg_predictions
         })
+        if inverse_transform_y is True:
+            try:
+                f = open("scale_y.pkl", "rb")
+                stats = pickle.load(f)
+                f.close()
+                avg_predictions[self.target_property] = avg_predictions[self.target_property]*stats[1]+stats[0]
+            except FileNotFoundError:
+                logging.warning(f"`inverse_transform_y` is `True`, however, `scale_y.pkl` is not found. Returning scaled values in avg_predictions!")
         logging.info(f"Number of models used to make the predictions is {n_models_used}.")
         return avg_predictions
     

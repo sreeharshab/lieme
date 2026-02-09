@@ -289,7 +289,7 @@ class FetchMaterials:
         return filtered_results
 
     def get_material_features(self, 
-                              results: Optional[List[SummaryDoc]]=None, 
+                              results: Optional[List[Material]]=None, 
                               tag: Optional[str]=None, 
                               standard_constraints: bool=True, 
                               custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None, 
@@ -307,7 +307,7 @@ class FetchMaterials:
         """Extracts features from a list of material's SummaryDoc objects.
 
         Args:
-            results (Optional[List[SummaryDoc]], optional): List of SummaryDoc objects containing 
+            results (Optional[List[Material]], optional): List of Material objects containing 
                 material information. Defaults to None.
             tag (Optional[str], optional): Features are saved in a file named `material_features_{tag}.pkl` 
                 if `tag` is provided, otherwise in `material_features.pkl`. Defaults to None.

@@ -463,6 +463,7 @@ class GetFeatures:
                                             "Average Li-B Distance", "Average M-B Distance", "Charge on Li", 
                                             "Charge on M", "Charge on B"))
         data = {}
+        self.mless = {}  # mless: minimum Li energy sites
         try:
             nlifolders = [entry.name for entry in os.scandir("Intercalation") if entry.is_dir()]
             if self.calc is not None:
@@ -511,6 +512,7 @@ class GetFeatures:
                 for ratio in li_m_ratios:
                     if ratio-0.1<=n_li/n_m<=ratio+0.1:
                         data[ratio] = data[round(n_li/n_m,2)]
+                        self.mless[ratio] = sites[mlei]
                 os.chdir("../")
             os.chdir("../")
             fhandle.write("\n") if fhandle else None
