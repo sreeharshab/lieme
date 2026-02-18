@@ -1,15 +1,16 @@
 import warnings
 import contextlib
 import io
+import gc
 from tqdm import tqdm
 from collections import Counter
 from typing import List, Tuple, Callable, Dict, Optional
+import numpy as np
 import pandas as pd
 from ase import Atoms
 from ase.calculators.calculator import Calculator
 from mp_api.client import MPRester
 from mp_api.client.core.client import MPRestError
-from emmet.core.summary import SummaryDoc
 from jarvis.db.figshare import data
 from jarvis.core.atoms import Atoms as JarvisAtoms
 from qmpy_rester import QMPYRester
@@ -181,7 +182,7 @@ class FetchMaterials:
         Returns:
             List[Material]: Material object for each material that follows the specified constraints.
         """
-        results = self.mpr.materials.summary.search(
+        docs = self.mpr.materials.summary.search(
             theoretical=False,
             fields=[
                 "material_id", "formula_pretty", "composition", "structure", 
@@ -191,23 +192,25 @@ class FetchMaterials:
             chunk_size=1000
         )
         filtered_results = []
-        for result in tqdm(results, desc="Filtering MP materials"):
-            if self.follows_constraints(result.composition, result.structure, 
+        for i, doc in enumerate(tqdm(docs, desc="Filtering MP materials")):
+            if self.follows_constraints(doc.composition, doc.structure, 
                                         standard_constraints, custom_constraints):
                 try:
                     with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-                        dos = self.mpr.get_dos_by_material_id(result.material_id)
+                        dos = self.mpr.get_dos_by_material_id(doc.material_id)
                 except MPRestError:
-                    dos = [0]*19
-                new_result = Material(
-                    material_id=result.material_id,
-                    structure=result.structure,
-                    composition=result.composition,
-                    formula_pretty=result.formula_pretty,
+                    dos = [np.nan]*19
+                result = Material(
+                    material_id=doc.material_id,
+                    structure=doc.structure,
+                    composition=doc.composition,
+                    formula_pretty=doc.formula_pretty,
                     dos = dos,
-                    band_gap=result.band_gap
+                    band_gap=doc.band_gap
                 )
-                filtered_results.append(new_result)
+                filtered_results.append(result)
+            if i%1000==0:
+                gc.collect()
         return filtered_results
     
     def query_jarvis(self,
@@ -293,16 +296,21 @@ class FetchMaterials:
                               tag: Optional[str]=None, 
                               standard_constraints: bool=True, 
                               custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None, 
-                              custom_cutoffs: Optional[dict]=None, 
+                              custom_cutoffs: Optional[dict]=None,
+                              energy_range: Optional[List[float]]=None, 
                               calc: Optional[Calculator]=None, 
                               fmax: float=0.05, 
                               li_m_ratios: List[float]=[0.25], 
+                              li_m_ratio_tol: float=0.1,
                               mu_li: float=-2.076286119, 
                               custom_n_m: Optional[dict]=None,
                               sampling_size: int=30,
                               seed: int=10,
                               li_atom_cutoff: float=1.7,
-                              li_li_cutoff: float=1.0
+                              li_li_cutoff: float=1.0,
+                              addnl_anions: Optional[dict]=None,
+                              mp: bool=True,
+                              xc: str="GGA_GGA+U"
                               ) -> pd.DataFrame:
         """Extracts features from a list of material's SummaryDoc objects.
 
@@ -315,11 +323,16 @@ class FetchMaterials:
                 standard constraints. Defaults to True.
             custom_constraints (Optional[List[Tuple[Callable[..., bool], Dict]]], optional): If not None, 
                 checks whether the material follows the custom constraints. Defaults to None.
-            custom_cutoffs (Optional[dict], optional): Custom neighbor list cutoffs for different elements. Defaults to None.
+            custom_cutoffs (Optional[dict], optional): Custom neighbor list cutoffs for different elements. 
+                Defaults to None.
+            energy_range (Optional[List[float]], optional): Custom energy range wrt fermi level to calculate 
+                band centers. Defaults to None.
             calc (Calculator, optional): ASE Calculator object for intercalation calculations. Defaults to None.
             fmax (float, optional): Maximum force criterion for relaxation. Defaults to 0.05 eV/Å.
             li_m_ratios (List[float], optional): List of Li/M ratios for which Li intercalation features 
                 are to be calculated. Defaults to [0.25].
+            li_m_ratio_tol (float, optional): Tolerance for Li/M ratio matching when reading from existing
+                intercalation directories. Defaults to 0.1.
             mu_li (float): The chemical potential of Li used to calculate the Li intercalation energies. 
                 Defaults to -2.076286119 eV/atom.
             custom_n_m (Optional[dict], optional): Custom number of metal atoms present in a material. Defaults to None.
@@ -327,6 +340,12 @@ class FetchMaterials:
             seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
             li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
             li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
+            addnl_anions (Optional[dict], optional): Additional anions other than the default ones to be 
+                considered during decomposition. Defaults to None.
+            mp (bool, optional): Whether to obtain the energy of the material itself from Materials Project. 
+                If False, the energy of the material is obtained using GetFeatures.energy. Defaults to True.
+            xc (str, optional): Exchange-correlation functional used to calculate the energy of the material 
+                in Materials Project. Defaults to "GGA_GGA+U".
 
         Returns:
             pd.DataFrame: Features for all materials.
@@ -338,7 +357,8 @@ class FetchMaterials:
             except:
                 results_jarvis = []
             try:
-                results_oqmd = self.query_oqmd(standard_constraints, custom_constraints)
+                # results_oqmd = self.query_oqmd(standard_constraints, custom_constraints)
+                results_oqmd = []
             except:
                 results_oqmd = []
             results = results_mp + results_jarvis + results_oqmd
@@ -368,7 +388,7 @@ class FetchMaterials:
                 f"B Valence p Band Center {suffix}",
                 f"B Conduction p Band Center {suffix}",
             ]
-        intercalation_cols = intercalation_cols if calc else []
+        intercalation_cols.append("Intercalation Stability")
         df = pd.DataFrame(columns=base_cols+intercalation_cols) 
         for result in results:
             material = str(result.material_id)
@@ -383,14 +403,15 @@ class FetchMaterials:
             lattice_parameters = list(relaxed_atoms.cell.cellpar()[0:3]/relaxed_atoms.get_volume())
             distances = features.get_li_m_b_distances(custom_cutoffs=custom_cutoffs)
             try:
-                dos_data = features.get_dos_data(dos=result.dos)
+                dos_data = features.get_dos_data(dos=result.dos, energy_range=energy_range)
             except MPRestError:
-                dos_data = [0]*19
+                dos_data = [np.nan]*19
             data = ([result.material_id, result.formula_pretty, result.composition, result.structure] 
                     + lattice_parameters + [max_void_radius] + distances + [result.band_gap] + dos_data[1:])
             if calc:
                 intercalation_data = features.get_intercalation_data(
                     li_m_ratios=li_m_ratios,
+                    li_m_ratio_tol=li_m_ratio_tol,
                     mu_li=mu_li,
                     custom_n_m=custom_n_m,
                     sampling_size=sampling_size,
@@ -399,6 +420,16 @@ class FetchMaterials:
                     li_li_cutoff=li_li_cutoff
                 )
                 data = data + intercalation_data
+            else:
+                data = data + [np.nan]*(len(intercalation_cols)-1)
+            if material.startswith("mp-"):
+                decomposition_data = features.get_intercalation_stability(api_key=self.api_key, 
+                                                                            addnl_anions=addnl_anions,
+                                                                            mp=mp, 
+                                                                            xc=xc)
+                data = data + [decomposition_data]
+            else:
+                data = data + [np.nan]
             next_index = len(df)
             df.loc[next_index] = data
             features.return_to_root()

@@ -31,9 +31,11 @@ class MaterialsEchemRegressor:
         """Initializes the MaterialsEchemRegressor to regress the input features to electrochemical performance output.
 
         Args:
-            jobs_path (str, optional): Path to the `jobs.pkl` file which contains the tuples of feature subsets corresponding to the training jobs. Defaults to "jobs.pkl".
+            jobs_path (str, optional): Path to the `jobs.pkl` file which contains the tuples of feature subsets 
+                corresponding to the training jobs. Defaults to "jobs.pkl".
             results_dir (str, optional): Directory path to store the training results. Defaults to "results".
-            db_path (str, optional): SQLite database path to store the training results (models and metadata). Defaults to "results.db".
+            db_path (str, optional): SQLite database path to store the training results (models and metadata). 
+                Defaults to "results.db".
             target_property (str, optional): The target property to be predicted. Defaults to "capacity_ratio".
         """
         self.jobs_path = jobs_path
@@ -53,20 +55,29 @@ class MaterialsEchemRegressor:
                         pca_n_components: int=2,
                         pca_n_features: int=33,
                         scale_x: bool=False,
-                        scale_y: bool=False
+                        scale_y: bool=False,
+                        replace_data: dict={
+                            "Nb2O5-T": {"Band Gap": 1.925}, 
+                            "Nb2O5-TT": {"Band Gap": 1.773}
+                            }
                         ) -> Tuple[DataFrame, DataFrame]:
         """Preprocesses the material features and electrochemical performance data.
 
         Args:
-            tag (Optional[str], optional): Features are preprocessed from a file with the name `material_features_{tag}.pkl` if `tag` is provided, otherwise from `material_features.pkl`. Defaults to None.
+            tag (Optional[str], optional): Features are preprocessed from a file with the name `material_features_{tag}.pkl` 
+                if `tag` is provided, otherwise from `material_features.pkl`. Defaults to None.
             x (Optional[DataFrame], optional): If `x` is None, features are preprocessed from `material_features.pkl`. Defaults to None.
-            y (Optional[DataFrame], optional): If `y` is None, electrochemical performance is preprocessed from `exp_data.xlsx`. Defaults to None.
-            excluded_materials (List[str], optional): Materials present in `material_features.pkl` to be excluded in preprocessing. Defaults to ["MoS2","VO2-M","VO2-R"].
+            y (Optional[DataFrame], optional): If `y` is None, electrochemical performance is preprocessed from `exp_data.xlsx`. 
+                Defaults to None.
+            excluded_materials (List[str], optional): Materials present in `material_features.pkl` to be excluded in preprocessing. 
+                Defaults to ["MoS2","VO2-M","VO2-R"].
             max_correlation_allowed (float, optional): Correlation cutoff to omit highly correlated features. Defaults to 0.8.
             pca_n_components (int, optional): Number of components in the PCA analysis. Defaults to 2.
             pca_n_features (int, optional): Number of top features to be considered according to PCA. Defaults to 33.
             scale_x (bool, optional): If True, scales `x` using StandardScaler. Defaults to False.
             scale_y (bool, optional): If True, scales `y` using StandardScaler. Defaults to False.
+            replace_data (dict, optional): Dictionary containing the values to be replaced in `x` for specific materials and features.
+                Defaults to {"Nb2O5-T": {"Band Gap": 1.925}, "Nb2O5-TT": {"Band Gap": 1.773}}.
 
         Returns:
             Tuple[DataFrame, DataFrame]: Processed `x` and `y` which can be used to train the models.
@@ -78,13 +89,15 @@ class MaterialsEchemRegressor:
             except:
                 raise FileNotFoundError(
                 f"`x` is not provided and `{file_name}` does not exist.\n"
-                f"Please run `get_material_features(tag={tag})` from `lieme.featurize` or `lieme.mpfetch` to generate the file or provide `x` explicitly."
+                f"Please run `get_material_features(tag={tag})` from `lieme.featurize` or `lieme.mpfetch` to "
+                f"generate the file or provide `x` explicitly."
             )
         materials = x["material"].tolist()
         x = x[[material not in excluded_materials for material in materials]]
         x = x.reset_index(drop=True)
-        x.loc[x["material"]=="Nb2O5-T", "Band Gap"] = 1.925
-        x.loc[x["material"]=="Nb2O5-TT", "Band Gap"] = 1.773
+        for material, replacements in replace_data.items():
+            for property, value in replacements.items():
+                x.loc[x["material"]==material, property] = value
         x = x.drop(columns=["material", "formula", "structure", "composition"])
         x = x.drop([col for col in x.columns if "0.5" in col], axis=1)
         x = x.loc[:, (x!=0).any(axis=0)]
@@ -131,7 +144,8 @@ class MaterialsEchemRegressor:
             y = y.loc[materials, ["Rev. Cap at 0.1C, mAh/g", "Rev. Cap at 5C, mAh/g"]]
             y = y[[material not in excluded_materials for material in materials]]
             if target_property == "capacity_ratio":
-                y[target_property] = (y["Rev. Cap at 0.1C, mAh/g"].values - y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
+                y[target_property] = (y["Rev. Cap at 0.1C, mAh/g"].values - 
+                                      y["Rev. Cap at 5C, mAh/g"].values)/y["Rev. Cap at 0.1C, mAh/g"].values
             elif target_property.startswith("capacity@"):
                 c_rate = target_property.split("@")[1].upper()
                 y[target_property] = y[f"Rev. Cap at {c_rate}, mAh/g"].values
@@ -155,7 +169,8 @@ class MaterialsEchemRegressor:
         Args:
             x_train (Optional[DataFrame], optional): Processed `x`. Defaults to None.
             n_features (int, optional): Size of the feature subset. Defaults to 4. 
-            exclude_jobs (Optional[List], optional): The tuple or index of feature subsets to be excluded. For example, [("Band Gap", "Volume"), ("Volume", "Band Center")] or [4,10]. Defaults to None.
+            exclude_jobs (Optional[List], optional): The tuple or index of feature subsets to be excluded. 
+                For example, [("Band Gap", "Volume"), ("Volume", "Band Center")] or [4,10]. Defaults to None.
         """
         if x_train is None:
             try:
@@ -166,7 +181,8 @@ class MaterialsEchemRegressor:
                 "Please run `preprocess_data(tag=\"train\")` or provide `x_train` explicitly."
             )
         column_combinations = list(combinations(x_train.columns,n_features))
-        if isinstance(exclude_jobs, list) and (all(isinstance(c, tuple) for c in exclude_jobs) or all(isinstance(c, list) for c in exclude_jobs)):
+        if isinstance(exclude_jobs, list) and (all(isinstance(c, tuple) for c in exclude_jobs) 
+                                               or all(isinstance(c, list) for c in exclude_jobs)):
             exclude_jobs = set(frozenset(c) for c in exclude_jobs)
             column_combinations = [c for c in column_combinations if frozenset(c) not in exclude_jobs]
         if isinstance(exclude_jobs, list) and all(isinstance(c, int) for c in exclude_jobs):
@@ -200,8 +216,10 @@ class MaterialsEchemRegressor:
         """Writes the training results from the results directory into the SQLite database.
 
         Args:
-            job_ids (Optional[List[int]], optional): List of job IDs to be written. If None, all results files in the `results` directory are written. Defaults to None.
-            cv_score_cutoff (float, optional): CV score cutoff to determine top models which are to be written. Note: Metadata will be written for all models. Defaults to 0.5.
+            job_ids (Optional[List[int]], optional): List of job IDs to be written. If None, all results files 
+                in the `results` directory are written. Defaults to None.
+            cv_score_cutoff (float, optional): CV score cutoff to determine top models which are to be written. 
+                Note: Metadata will be written for all models. Defaults to 0.5.
             batch_size (int, optional): Number of results to be written in a single batch. Defaults to 100.
         """
         conn = None
@@ -266,11 +284,15 @@ class MaterialsEchemRegressor:
         """Trains a model using the specified job_id in reference to the jobs in `jobs.pkl`. Training is done using TPOT.
 
         Args:
-            x_train (Optional[DataFrame], optional): Input material features. If None, `x_train.pkl` should be present in the working directory. Defaults to None.
-            y_train (Optional[DataFrame], optional): Output electrochemical performance. If None, `y_train.pkl` should be present in the working directory. Defaults to None.
+            x_train (Optional[DataFrame], optional): Input material features. If None, `x_train.pkl` should be present 
+                in the working directory. Defaults to None.
+            y_train (Optional[DataFrame], optional): Output electrochemical performance. If None, `y_train.pkl` should 
+                be present in the working directory. Defaults to None.
             job_id (int, optional): ID of the job to be trained. Defaults to 0.
-            tpot_generations (int, optional): Number of TPOT generations. Refer to documentation of TPOT for more details. Defaults to 50.
-            tpot_population_size (int, optional): Population size for TPOT. Refer to documentation of TPOT for more details. Defaults to 50.
+            tpot_generations (int, optional): Number of TPOT generations. Refer to documentation of TPOT for more details. 
+                Defaults to 50.
+            tpot_population_size (int, optional): Population size for TPOT. Refer to documentation of TPOT for more details. 
+                Defaults to 50.
 
         Returns:
             Tuple[Pipeline, float]: The model and its cross-validation score.
@@ -301,9 +323,23 @@ class MaterialsEchemRegressor:
         features = all_combinations[job_id]
         x_train_subset = x_train[list(features)]
         if version.parse(tpot.__version__) <= version.parse("0.12.2"):
-            est = tpot.TPOTRegressor(generations=tpot_generations, population_size=tpot_population_size, verbosity=2, random_state=42, scoring="r2")
+            est = tpot.TPOTRegressor(generations=tpot_generations, 
+                                     population_size=tpot_population_size, 
+                                     verbosity=2, 
+                                     random_state=42, 
+                                     scoring="r2"
+                                     )
         else:
-            est = tpot.TPOTEstimator(search_space="linear", scorers=["r2"], scorers_weights=[1], classification=False, generations=tpot_generations, population_size=tpot_population_size, verbose=2, random_state=42, max_time_mins=None)
+            est = tpot.TPOTEstimator(search_space="linear", 
+                                     scorers=["r2"], 
+                                     scorers_weights=[1], 
+                                     classification=False, 
+                                     generations=tpot_generations, 
+                                     population_size=tpot_population_size, 
+                                     verbose=2, 
+                                     random_state=42, 
+                                     max_time_mins=None
+                                     )
         try:
             logging.info(f"Training job_id {job_id}...")
             est.fit(x_train_subset.values, y_train.values)
@@ -355,7 +391,8 @@ class MaterialsEchemRegressor:
 
         Args:
             bins (List[float], optional): Bins for the histogram. Defaults to [-np.inf, 0, 0.1, 0.2, 0.3, 0.4, 0.5, 1].
-            labels (List[str], optional): Labels for the histogram bins. Defaults to ["≤0", "0–0.1", "0.1–0.2", "0.2–0.3", "0.3–0.4", "0.4–0.5", ">0.5"].
+            labels (List[str], optional): Labels for the histogram bins. Defaults to 
+                ["≤0", "0–0.1", "0.1–0.2", "0.2–0.3", "0.3–0.4", "0.4–0.5", ">0.5"].
 
         Returns:
             plt.Figure: Matplotlib figure object showing the histogram of train cross-validation scores.
@@ -394,9 +431,11 @@ class MaterialsEchemRegressor:
         features = sum(features, [])
         feature_counts = Counter(features)
         compositional_features = [feature for feature in features if "MagpieData" in feature]
-        electronic_features = [feature for feature in features if ("Charge" in feature or "Band Center" in feature or "Band Gap" in feature) and ("Li/M" not in feature)]
+        electronic_features = [feature for feature in features if 
+                               ("Charge" in feature or "Band Center" in feature or "Band Gap" in feature) and ("Li/M" not in feature)]
         intercalation_features = [feature for feature in features if "Li/M" in feature]
-        structural_features = [feature for feature in features if feature not in (compositional_features + electronic_features + intercalation_features)]
+        structural_features = [feature for feature in features if feature not in 
+                               (compositional_features + electronic_features + intercalation_features)]
         grouped_features = {
             "compositional": [],
             "structural": [],
@@ -455,15 +494,24 @@ class MaterialsEchemRegressor:
         plt.savefig("feature_counts.png", bbox_inches="tight")
         return fig
     
-    def get_shap_values(self, x_train: Optional[DataFrame]=None, cv_score_cutoff: float=0.5, sample_size: int=100, shap_dir: str="shaps", save_shap: bool=True) -> Tuple[DataFrame, Series]:
+    def get_shap_values(self, 
+                        x_train: Optional[DataFrame]=None, 
+                        cv_score_cutoff: float=0.5, 
+                        sample_size: int=100, 
+                        shap_dir: str="shaps", 
+                        save_shap: bool=True
+                        ) -> Tuple[DataFrame, Series]:
         """Computes the mean absolute SHAP values for all features across all top models.
 
         Args:
-            x_train (Optional[DataFrame], optional): Input material features. If None, `x_train.pkl` should be present in the working directory. Defaults to None.
+            x_train (Optional[DataFrame], optional): Input material features. If None, `x_train.pkl` should be 
+                present in the working directory. Defaults to None.
             cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
             sample_size (int, optional): Number of samples used to compute SHAP. Defaults to 100.
-            shap_dir (str, optional): Directory to store the full SHAP values for each feature in each top model. Defaults to "shaps".
-            save_shap (bool, optional): If True, saves the full SHAP values for each feature in each top model in `shap_dir`. Defaults to True.
+            shap_dir (str, optional): Directory to store the full SHAP values for each feature in each top model. 
+                Defaults to "shaps".
+            save_shap (bool, optional): If True, saves the full SHAP values for each feature in each top model 
+                in `shap_dir`. Defaults to True.
 
         Returns:
             DataFrame: Mean absolute SHAP values for each feature in each top model.
@@ -517,12 +565,17 @@ class MaterialsEchemRegressor:
         """Tests the trained models. The test is done using the top models based on the cross-validation score.
 
         Args:
-            x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be present in the working directory. Defaults to None.
+            x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be 
+                present in the working directory. Defaults to None.
             cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
-            excluded_features (Optional[List[str]], optional): All models which contain the excluded features are not used to test. Defaults to None.
-            meta_model (Optional[Pipeline], optional): If provided, a stacking regressor is built using the top models as base models and `meta_model` as the final estimator. Defaults to None.
-            scale_x (bool, optional): If True, scales `x_test` using the scaling parameters saved during preprocessing. Defaults to False.
-            inverse_transform_y (bool, optional): If True, inverse transforms the predicted target property using the scaling parameters saved during preprocessing. Defaults to False.
+            excluded_features (Optional[List[str]], optional): All models which contain the excluded features 
+                are not used to test. Defaults to None.
+            meta_model (Optional[Pipeline], optional): If provided, a stacking regressor is built using the top models 
+                as base models and `meta_model` as the final estimator. Defaults to None.
+            scale_x (bool, optional): If True, scales `x_test` using the scaling parameters saved during preprocessing. 
+                Defaults to False.
+            inverse_transform_y (bool, optional): If True, inverse transforms the predicted target property using the 
+                scaling parameters saved during preprocessing. Defaults to False.
 
         Returns:
             DataFrame: Average predictions from the top models for all materials in `x_test`.
@@ -598,7 +651,8 @@ class MaterialsEchemRegressor:
                 f.close()
                 avg_predictions[self.target_property] = avg_predictions[self.target_property]*stats[1]+stats[0]
             except FileNotFoundError:
-                logging.warning(f"`inverse_transform_y` is `True`, however, `scale_y.pkl` is not found. Returning scaled values in avg_predictions!")
+                logging.warning("`inverse_transform_y` is `True`, however, `scale_y.pkl` is not found. "
+                                "Returning scaled values in avg_predictions!")
         logging.info(f"Number of models used to make the predictions is {n_models_used}.")
         return avg_predictions
     
@@ -612,10 +666,14 @@ class MaterialsEchemRegressor:
         """Tests the trained models with respect to different cross-validation score cutoffs.
 
         Args:
-            cv_score_cutoffs (Optional[Union[List[float], np.ndarray]], optional): List of CV score cutoffs to determine top models. If None, cutoffs from 0.45 to 0.56 with a step size of 0.01 are used. Defaults to None.
-            x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be present in the working directory. Defaults to None.
-            excluded_features (Optional[List[str]], optional): All models which contain the excluded features are not used to test. Defaults to None.
-            target_property_threshold (float, optional): Threshold for the target property to consider a material as top. Defaults to None.
+            cv_score_cutoffs (Optional[Union[List[float], np.ndarray]], optional): List of CV score cutoffs to determine top models. 
+                If None, cutoffs from 0.45 to 0.56 with a step size of 0.01 are used. Defaults to None.
+            x_test (Optional[DataFrame], optional): Input material features. If None, `x_test.pkl` should be 
+                present in the working directory. Defaults to None.
+            excluded_features (Optional[List[str]], optional): All models which contain the excluded features 
+                are not used to test. Defaults to None.
+            target_property_threshold (float, optional): Threshold for the target property to consider a material as top. 
+                Defaults to None.
             lower_is_better (bool, optional): If True, lower values of target property are better. Defaults to True.
         
         Returns:
@@ -647,12 +705,17 @@ class MaterialsEchemRegressor:
             avg_predictions_wrt_cutoffs = avg_predictions_wrt_cutoffs[mask]
         return avg_predictions_wrt_cutoffs
     
-    def get_element_frequencies(self, avg_predictions: DataFrame, target_property_threshold: float=None, lower_is_better: bool=True) -> Tuple[Tuple, Tuple]:
+    def get_element_frequencies(self, 
+                                avg_predictions: DataFrame, 
+                                target_property_threshold: float=None, 
+                                lower_is_better: bool=True
+                                ) -> Tuple[Tuple, Tuple]:
         """Calculates the prevelant elements and their frequencies in the top materials based on the average predictions.
 
         Args:
             avg_predictions (DataFrame): Average predictions from the `test` method.
-            target_property_threshold (float, optional): Threshold for the target property to consider a material as top. Defaults to 0.3.
+            target_property_threshold (float, optional): Threshold for the target property to consider a material as top. 
+                Defaults to 0.3.
             lower_is_better (bool, optional): If True, lower values of target property are better. Defaults to True.
 
         Returns:

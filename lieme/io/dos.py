@@ -22,35 +22,53 @@ class DOS:
             return
         assert os.path.exists("DOSCAR"), "DOSCAR is missing. DOS calculation is incomplete. Please check your calculation!"
         with open("DOSCAR", "r") as f:
-            lines = f.readlines()
-        header = lines[5].split()
-        self.fermi_energy = float(header[3])
-        start = 6
-        nedos = int(header[2])
-
-        for line in lines[start:start+nedos]:
-            values = np.array(list(map(float, line.split())))
-            self.energies = np.append(self.energies, values[0])
-            self.energies_wrt_fermi = self.energies - self.fermi_energy
-            if values.size==3:
+            n_atoms = int(next(f).split()[0])
+            for _ in range(4):
+                next(f)
+            header = next(f).split()
+            self.fermi_energy = float(header[3])
+            nedos = int(header[2])
+            self.energies = np.zeros(nedos, dtype=np.float32)
+            self.energies_wrt_fermi = np.zeros(nedos, dtype=np.float32)
+            self.total_dos_up = np.zeros(nedos, dtype=np.float32)
+            first_dos_line = next(f)
+            values = list(map(float, first_dos_line.split()))
+            self.energies[0] = values[0]
+            self.energies_wrt_fermi[0] = self.energies[0] - self.fermi_energy
+            if len(values)==3:
                 self.is_spin_polarized = False
-                self.total_dos_up = np.append(self.total_dos_up, values[1])
-            elif values.size==5:
+                self.total_dos_up[0] = values[1]
+            elif len(values)==5:
                 self.is_spin_polarized = True
-                self.total_dos_up = np.append(self.total_dos_up, values[1])
-                self.total_dos_down = np.append(self.total_dos_down, values[2])
-
-        if len(lines) > start+nedos:
-            self.partial_dos = []
-            n_atoms = int(lines[0].split()[0])
-            partial_start = start+nedos+1
-            for i in range(n_atoms):
-                atom_partial_dos = []
-                for line in lines[partial_start+i*nedos+i:partial_start+(i+1)*nedos+i]:
-                    values = list(map(float, line.split()))
-                    atom_partial_dos.append(values[1:])
-                self.partial_dos.append(atom_partial_dos)
-            self.partial_dos = np.array(self.partial_dos)
+                self.total_dos_down = np.zeros(nedos, dtype=np.float32)
+                self.total_dos_up[0] = values[1]
+                self.total_dos_down[0] = values[2]
+            for i in range(1, nedos):
+                values = list(map(float, next(f).split()))
+                self.energies[i] = values[0]
+                self.energies_wrt_fermi[i] = self.energies[i] - self.fermi_energy
+                self.total_dos_up[i] = values[1]
+                if self.is_spin_polarized:
+                    self.total_dos_down[i] = values[2]
+            partial = False
+            try:
+                next(f)
+                partial = True
+            except StopIteration:
+                partial = False
+            if partial:
+                first_partial_dos_line = next(f)
+                n_orbitals = len(first_partial_dos_line.split()) - 1
+                self.partial_dos = np.zeros((n_atoms, nedos, n_orbitals), dtype=np.float32)
+                self.partial_dos[0, 0, :] = list(map(float, first_partial_dos_line.split()[1:]))
+                for energy_idx in range(1, nedos):
+                    line = next(f)
+                    self.partial_dos[0, energy_idx, :] = list(map(float, line.split()[1:]))
+                for atom_idx in range(1, n_atoms):
+                    next(f)
+                    for energy_idx in range(nedos):
+                        line = next(f)
+                        self.partial_dos[atom_idx, energy_idx, :] = list(map(float, line.split()[1:]))
         self.is_parsed = True
     
     def get_band_gap(self) -> float:
@@ -84,7 +102,9 @@ class DOS:
         return gap_calc(total_dos_up_and_down)
     
     def get_total_dos(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Gives the total DOS of the system. For spin polarized calculations, it provides the total DOS of spin up and down channels. For non spin polarized calculations, the total DOS is provided in the spin up channel and the spin down channel is empty.
+        """Gives the total DOS of the system. For spin polarized calculations, it provides the total DOS of 
+            spin up and down channels. For non spin polarized calculations, the total DOS is provided in the 
+            spin up channel and the spin down channel is empty.
 
         Returns:
             Tuple[np.ndarray, np.ndarray]: Total DOS of spin up and down channels.
@@ -93,11 +113,15 @@ class DOS:
         return self.total_dos_up, self.total_dos_down
     
     def get_orbital_projected_dos(self, orbital: str, dos_wrt_orb=None) -> Tuple[np.ndarray, np.ndarray]:
-        """Gives the orbital projected DOS of the system. For spin polarized calculations, it provides the orbital projected DOS of spin up and down channels. For non spin polarized calculations, the orbital projected DOS is provided in the spin up channel and the spin down channel is empty.
+        """Gives the orbital projected DOS of the system. For spin polarized calculations, it provides the orbital 
+            projected DOS of spin up and down channels. For non spin polarized calculations, the orbital projected 
+            DOS is provided in the spin up channel and the spin down channel is empty.
 
         Args:
             orbital (str): Orbital on which the DOS is to be projected on, example: "d".
-            dos_wrt_orb (_np.ndarray, optional): DOS with respect to different orbitals (s_up, s_down, px_up, px_down, py_up, py_down, ...). This is an internal parameter. Defaults to None.
+            dos_wrt_orb (_np.ndarray, optional): DOS with respect to different orbitals (s_up, 
+                s_down, px_up, px_down, py_up, py_down, ...). This is an internal parameter. 
+                Defaults to None.
 
         Returns:
             Tuple[np.ndarray, np.ndarray]: Orbital projected DOS of spin up and down channels.
@@ -142,7 +166,9 @@ class DOS:
         return orb_proj_dos_up, orb_proj_dos_down
     
     def get_select_atoms_orbital_projected_dos(self, indices: List[int], orbital: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Gives the orbital projected DOS of select atoms in the system. For spin polarized calculations, it provides the orbital projected DOS of spin up and down channels. For non spin polarized calculations, the orbital projected DOS is provided in the spin up channel and the spin down channel is empty.
+        """Gives the orbital projected DOS of select atoms in the system. For spin polarized calculations, 
+            it provides the orbital projected DOS of spin up and down channels. For non spin polarized calculations, 
+            the orbital projected DOS is provided in the spin up channel and the spin down channel is empty.
         
         Args:
             indices (List[int]): Indices of atoms for which the orbital projected DOS is to be calculated.
@@ -156,16 +182,22 @@ class DOS:
         atoms_orb_proj_dos_up, atoms_orb_proj_dos_down = self.get_orbital_projected_dos(orbital, dos_wrt_orb=dos_wrt_orb)
         return atoms_orb_proj_dos_up, atoms_orb_proj_dos_down
     
-    def get_band_center(self, dos_up: np.ndarray, dos_down: Optional[np.ndarray]=None, energy_range: Optional[List[float]]=None) -> float:
+    def get_band_center(self, 
+                        dos_up: np.ndarray, 
+                        dos_down: Optional[np.ndarray]=None, 
+                        energy_range: Optional[List[float]]=None
+                        ) -> float:
         """Provides the band center of the DOS.
 
         Args:
             dos_up (np.ndarray): Spin up channel of DOS for which the band center is to be calculated.
-            dos_down (Optional[np.ndarray], optional): Spin down channel of DOS for which the band center is to be calculated. Defaults to None.
-            energy_range (Optional[List[float]], optional): Energy range of the DOS for which the band center is to be calculated. If None, the band center is calculated over the full energy range. Defaults to None.
+            dos_down (Optional[np.ndarray], optional): Spin down channel of DOS for which the band center is to be calculated. 
+                Defaults to None.
+            energy_range (Optional[List[float]], optional): Energy range of the DOS for which the band center is to be calculated. 
+                If None, the band center is calculated over the full energy range. Defaults to None.
 
         Returns:
-            float: Band center of thr DOS.
+            float: Band center of the DOS.
         """
         self.parse_doscar()
         try:
@@ -180,7 +212,7 @@ class DOS:
                 dos_up_and_down = dos_up
             band_center = np.average(energies, weights=dos_up_and_down)
         except ZeroDivisionError:
-            band_center = 0
+            band_center = np.nan
         return band_center
     
     def get_dos_in_energy_range(self, dos: np.ndarray, energy_range: List[float]) -> Tuple[np.ndarray, np.ndarray]:
