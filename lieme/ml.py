@@ -11,7 +11,7 @@ from packaging import version
 import pandas as pd
 from pandas import DataFrame, Series
 import numpy as np
-from sklearn.metrics import get_scorer
+from sklearn.metrics import get_scorer, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.pipeline import Pipeline
@@ -94,6 +94,8 @@ class MaterialsEchemRegressor:
             )
         materials = x["material"].tolist()
         x = x[[material not in excluded_materials for material in materials]]
+        materials = x["material"].tolist()
+        compositions = x["composition"].tolist()
         x = x.reset_index(drop=True)
         for material, replacements in replace_data.items():
             for property, value in replacements.items():
@@ -131,6 +133,8 @@ class MaterialsEchemRegressor:
             x = x_scaled[selected_features_pca[0:pca_n_features]]
         else:
             x = x[selected_features_pca[0:pca_n_features]]
+        x["material"] = materials
+        x["composition"] = compositions
         file_name = f"x_{tag}.pkl" if tag else "x.pkl"
         x.to_pickle(file_name)
 
@@ -180,6 +184,10 @@ class MaterialsEchemRegressor:
                 f"`x_train` is not provided and `x_train.pkl` does not exist.\n"
                 "Please run `preprocess_data(tag=\"train\")` or provide `x_train` explicitly."
             )
+        try:
+            x_train = x_train.drop(columns=["material", "composition"])
+        except KeyError:
+            pass
         column_combinations = list(combinations(x_train.columns,n_features))
         if isinstance(exclude_jobs, list) and (all(isinstance(c, tuple) for c in exclude_jobs) 
                                                or all(isinstance(c, list) for c in exclude_jobs)):
@@ -704,6 +712,57 @@ class MaterialsEchemRegressor:
             mask = avg_predictions_wrt_cutoffs.groupby("material")[self.target_property].transform(operation)
             avg_predictions_wrt_cutoffs = avg_predictions_wrt_cutoffs[mask]
         return avg_predictions_wrt_cutoffs
+    
+    def plot_parity(self, 
+                    x_train: Optional[DataFrame]=None,
+                    cv_score_cutoff: float=0.5,
+                    excluded_features: Optional[List[str]]=None,
+                    scale_x: bool=False,
+                    inverse_transform_y: bool=False,
+                    label_scatter: bool=False,
+                    ) -> plt.Figure:
+        """Generates a parity plot comparing the average predictions from the top models with the actual target property values.
+        """
+        if x_train is None:
+            try:
+                x_train = pd.read_pickle("x_train.pkl")
+            except:
+                raise FileNotFoundError(
+                f"`x_train` is not provided and `x_train.pkl` does not exist.\n"
+                "Please run `preprocess_data(tag=\"train\")` or provide `x_train` explicitly."
+            )
+        avg_predictions = self.test(x_test=x_train, 
+                                    cv_score_cutoff=cv_score_cutoff,
+                                    excluded_features=excluded_features,
+                                    scale_x=scale_x,
+                                    inverse_transform_y=inverse_transform_y
+                                    )
+        y_train = pd.read_pickle("y_train.pkl")
+        r2 = r2_score(y_train.values, avg_predictions[self.target_property].values)
+        fig = plt.figure(dpi=200, figsize=(6,6))
+        ax = fig.gca()
+        ax.scatter(y_train.values, avg_predictions[self.target_property].values, 
+                   color="darkviolet", edgecolor="k", label=f"R² = {r2:.2f}")
+        if label_scatter:
+            for i, label in enumerate(x_train["material"].values):
+                x, y = y_train.values[i], avg_predictions[self.target_property].values[i]
+                ax.annotate(label, (x, y),
+                            xytext=(10, 10), textcoords="offset points",
+                            fontsize=6, alpha=0.8,
+                            arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0",
+                                        color="gray", lw=0.5))
+        ax.plot([y_train.min(), y_train.max()], [y_train.min(), y_train.max()], 
+                color="gray", linestyle="--")
+        for axis in ["top", "bottom", "left", "right"]:
+            ax.spines[axis].set_linewidth(1.5)
+        ax.tick_params(bottom = True, top = True, left = True, right = True)
+        ax.tick_params(axis = "x", direction = "in")
+        ax.tick_params(axis = "y", direction = "in")
+        plt.xlabel("Actual")
+        plt.ylabel("Predicted")
+        plt.legend(frameon=False)
+        plt.savefig("parity.png", bbox_inches="tight")
+        return fig
     
     def get_element_frequencies(self, 
                                 avg_predictions: DataFrame, 
