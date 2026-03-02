@@ -24,7 +24,7 @@ from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.io.ase import AseAtomsAdaptor
 from pymatgen.io.vasp import Vasprun
 from mp_api.client import MPRester
-from lieme.io import DOS, get_atoms_with_charges
+from lieme.io import DOS, get_atoms_with_charges, repeat_to_n_atoms
 
 """
 Li (li): Lithium
@@ -137,11 +137,10 @@ class GetFeatures:
             self.formula, self.metals, self.bridging_elements = get_formula_m_b(atoms)
             logging.info(f"Material: {self.material}, Formula: {self.formula}")
             logged = True
-        if atoms is not None and len(atoms)<10:
+        if atoms is not None and len(atoms) < 20:
             logging.warning(f"The provided Atoms object for {material} has less than 10 atoms. "
                             "Repeating it to avoid errors during feature extraction.")
-            repeat = int(np.ceil(10/len(atoms)))
-            atoms = atoms*(repeat,1,1)
+            atoms = repeat_to_n_atoms(atoms, n_atoms=20)
         self.atoms = atoms
         self.calc = calc
         self.fmax = fmax
@@ -489,11 +488,11 @@ class GetFeatures:
         if fhandle:
             fhandle.write(f"Material: {self.material}, Formula: {self.formula}:\n")
             str_format = "{:^15} {:^28} {:^15} {:^15} {:^15} {:^23} {:^23} {:^23}\n"
-            fhandle.write(str_format.format("Site", "Li Intercalation Energy (eV)", "Average Li-M Distance", 
+            fhandle.write(str_format.format("Sample", "Li Intercalation Energy (eV)", "Average Li-M Distance", 
                                             "Average Li-B Distance", "Average M-B Distance", "Charge on Li", 
                                             "Charge on M", "Charge on B"))
         data = {}
-        self.mless = {}  # mless: minimum Li energy sites
+        self.mless = {}  # mless: minimum Li energy samples
         try:
             nlidirs = [entry.name for entry in os.scandir("Intercalation") if entry.is_dir()]
             if self.calc is not None:
@@ -510,13 +509,13 @@ class GetFeatures:
                 fhandle.write(f"\tNumber of Li: {n_li}\n") if fhandle else None
                 os.chdir(nlidir)
                 oswalk = [i for i in os.walk(".")]
-                sites = sorted(oswalk[0][1])
+                samples = sorted(oswalk[0][1])
                 (li_energies, volume_changes, li_m_distances, li_b_distances, m_b_distances, 
                  li_charges, m_charges, b_charges, b_val_band_centers, b_cond_band_centers) = [[] for _ in range(10)]
                 if self.calc is not None:
-                    assert len(sites)==sampling_size, "Intercalation directories are not complete."
-                for site in sites:
-                    os.chdir(f"{site}")
+                    assert len(samples)==sampling_size, "Intercalation directories are not complete."
+                for sample in samples:
+                    os.chdir(f"{sample}")
                     try:
                         atoms_with_li, energy_with_li = get_relaxed_atoms_and_energy(dir_name="geo_opt")
                     except (FileNotFoundError, OSError):
@@ -525,16 +524,16 @@ class GetFeatures:
                     lists = [li_energies, volume_changes, li_m_distances, li_b_distances, m_b_distances, 
                              li_charges, m_charges, b_charges, b_val_band_centers, b_cond_band_centers]
                     values = self.get_intercalation_values(atoms, energy, volume, atoms_with_li, energy_with_li, mu_li)
-                    fhandle.write(str_format.format(site, values[0], values[2], values[3], values[4], values[5], 
+                    fhandle.write(str_format.format(sample, values[0], values[2], values[3], values[4], values[5], 
                                                     values[6], values[7])) if fhandle else None
                     for lst, val in zip(lists, values):
                         lst.append(val)
                     os.chdir("../")
                 mlei = li_energies.index(min(li_energies))  # mlei: minimum Li energy index
                 if (np.isnan(li_charges[mlei]) and np.isnan(m_charges[mlei]) and np.isnan(b_charges[mlei])):
-                    logging.warning(f"bader does not exist/is not completed at `{os.getcwd()}/{sites[mlei]}`. Taking charges as NaN...")
+                    logging.warning(f"bader does not exist/is not completed at `{os.getcwd()}/{samples[mlei]}`. Taking charges as NaN...")
                 if (np.isnan(b_val_band_centers[mlei]) and np.isnan(b_cond_band_centers[mlei])):
-                    logging.warning(f"dos does not exist/is not completed at `{os.getcwd()}/{sites[mlei]}`. Taking band centers as NaN...")
+                    logging.warning(f"dos does not exist/is not completed at `{os.getcwd()}/{samples[mlei]}`. Taking band centers as NaN...")
                 data[round(n_li/n_m,2)] = [li_energies[mlei], volume_changes[mlei], li_m_distances[mlei], 
                                            li_b_distances[mlei], m_b_distances[mlei], li_charges[mlei], 
                                            m_charges[mlei], b_charges[mlei], b_val_band_centers[mlei], 
@@ -542,7 +541,7 @@ class GetFeatures:
                 for ratio in li_m_ratios:
                     if ratio-li_m_ratio_tol<=n_li/n_m<=ratio+li_m_ratio_tol:
                         data[ratio] = data[round(n_li/n_m,2)]
-                        self.mless[ratio] = sites[mlei]
+                        self.mless[ratio] = samples[mlei]
                 os.chdir("../")
             os.chdir("../")
             fhandle.write("\n") if fhandle else None
@@ -585,12 +584,15 @@ class GetFeatures:
                                     composition: Optional[Composition]=None, 
                                     addnl_anions: Optional[dict]=None, 
                                     mp: bool=False, 
-                                    xc: str="GGA_GGA+U"
+                                    xc: str="GGA_GGA+U",
+                                    li_potential: float=0,
+                                    basis: str="per_metal"
                                     ) -> float:
         """Calculates the stability of the intercalated material with respect to decomposition, calculated as 
-            (energy of products - energy of reactants)/(number of Li required to decompose). The energy of 
-            the material is obtained using either self.energy or MP, while the energies of the rest are 
-            obtained using MP.
+            (energy of products - energy of reactants)/(basis). The energy of the material is obtained using 
+            either self.energy or MP, while the energies of the rest are obtained using MP.
+            Decomposition: AxBy + nLi -> xA + yLizB (for anion B with charge z, where n becomes y*z to 
+            balance the reaction)
 
         Args:
             api_key (str): API key to access the Materials Project database.
@@ -600,6 +602,10 @@ class GetFeatures:
                 If False, the energy of the material is obtained using self.energy. Defaults to False.
             xc (str, optional): Exchange-correlation functional used to calculate the energy of the material 
                 in Materials Project. Defaults to "GGA_GGA+U".
+            li_potential (float, optional): The chemical potential of Li used to balance the decomposition 
+                reaction. Defaults to 0 eV/atom (i.e., U vs Li/Li+ = 0 V).
+            basis (str, optional): Whether to calculate the stability per metal atom ("per_metal") or per Li 
+                required to decompose ("per_li"). Defaults to "per_metal".
 
         Returns:
             float: The stability of the intercalated material with respect to decomposition.
@@ -607,12 +613,18 @@ class GetFeatures:
         if composition is None:
             composition = self.structure.composition
         reactants, products = self.decompose(composition=composition, addnl_anions=addnl_anions)
+        mu_li0 = self.get_mp_energy_from_composition(reactants[1], api_key, xc=xc)/reactants[1].num_atoms
+        energy_li = (mu_li0 - li_potential)*reactants[1].num_atoms
         if mp:
-            energy_reactants = sum([self.get_mp_energy_from_composition(comp, api_key, xc=xc) for comp in reactants])
+            energy_reactants = sum([self.get_mp_energy_from_composition(comp, api_key, xc=xc) for comp in reactants]) - mu_li0*reactants[1].num_atoms + energy_li
         else:
-            energy_reactants = self.energy + sum([self.get_mp_energy_from_composition(comp, api_key, xc=xc) for comp in reactants[1:]])
+            energy_reactants = self.energy + energy_li + sum([self.get_mp_energy_from_composition(comp, api_key, xc=xc) for comp in reactants[2:]])
         energy_products = sum([self.get_mp_energy_from_composition(comp, api_key, xc=xc) for comp in products])
-        stability = (energy_products - energy_reactants)/reactants[1].num_atoms
+        if basis=="per_metal":
+            n_m = sum(reactants[0].get(metal, 0) for metal in self.metals)
+            stability = (energy_products - energy_reactants)/n_m
+        elif basis=="per_li":
+            stability = (energy_products - energy_reactants)/reactants[1].num_atoms
         return round(stability,3)    
 
     def get_mp_energy_from_composition(self, composition: Composition, api_key: str, xc: str="GGA_GGA+U") -> List[float]:
