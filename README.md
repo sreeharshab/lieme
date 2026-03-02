@@ -47,12 +47,13 @@ material\
 ├── Bader_calculation\
 ├── Intercalation\
 &emsp;&emsp;&emsp;├── n_Li\
-&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ├── Site\
+&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ├── Sample\
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ├── geo_opt\
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ├── dos\
-&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ├── bader
+&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp; ├── bader\
+├── Diffusion_calculation
 
-n in n_Li is a positive integer. Site can be replaced with any custom name. An example of the directory structure is provided in the [`example`](./example/) directory.
+n in n_Li is a positive integer. Sample can be replaced with any custom name. An example of the directory structure is provided in the [`example`](./example/) directory.
 
 ```python
 from lieme.featurize import get_material_features
@@ -61,7 +62,23 @@ materials = ["material"]
 x = get_material_features(materials=materials)
 ```
 
-⚠️ Experimental: For materials with missing Intercalation DFT data, features can be calculated on-the-fly by passing a custom ASE calculator `calc` to `get_material_features()`. This is mainly intended to automate the sampling of Li intercalation in the material and hence using an MLIP calculator is suggested. Make sure your Energy_calculation folder contains a POSCAR, else pass an `atoms_list` which corresponds to the `materials`. This functionality is experimental and is currently only available using `git clone`.
+⚠️ Experimental: For materials with missing Intercalation DFT data, features can be calculated on-the-fly by passing a custom ASE calculator `calc` to `get_material_features()`. This is mainly intended to automate the sampling of Li intercalation in the material and hence using an MLIP calculator is suggested. Make sure your Energy_calculation folder contains a POSCAR, else pass an `atoms_list` which corresponds to the `materials`.
+
+## Generating DFT Data
+⚠️ Experimental: The directory structure mentioned above can now be generated automatically. MLIP is used to accelerate the Li intercalation/deintercalation sampling, and VASP is used to generate DFT data.
+```bash
+export VTST_SCRIPTS=/path/to/VTST/root
+export VTST_BADER=/path/to/bader/executable
+export VASP_PP_PATH=/path/to/VASP_Potentials
+export VASP_COMMAND="VASP run command"
+export LAMMPS_COMMAND="LAMMPS run command"
+```
+```python
+from lieme.workflowgen import WorkFlowGenerator
+
+workflow = WorkFlowGenerator(material=material, atoms=atoms, mlip_calc=mlip_calc)
+workflow.run()
+```
 
 ## Obtaining Input Features from Materials Project
 Input features can also be generated for materials in Materials Project.
@@ -99,3 +116,5 @@ predictions = regressor.test()
 Make sure you have `x_train`, `y_train` and `x_test` as .pkl files when you run the code mentioned above. If not, pass in `x_train` and `y_train` in `train()` and `x_test` in `test()`.
 
 For advanced usage, refer to the detailed documentation in the respective modules.
+
+All experimental functionalities are only available using `git clone`.
