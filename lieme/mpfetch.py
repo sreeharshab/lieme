@@ -293,7 +293,6 @@ class FetchMaterials:
 
     def get_material_features(self, 
                               results: Optional[List[Material]]=None, 
-                              tag: Optional[str]=None, 
                               standard_constraints: bool=True, 
                               custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None, 
                               custom_cutoffs: Optional[dict]=None,
@@ -308,9 +307,15 @@ class FetchMaterials:
                               seed: int=10,
                               li_atom_cutoff: float=1.7,
                               li_li_cutoff: float=1.0,
+                              temperatures: List[float] = [1000, 1500],
+                              msd_col_idx: int=7,
+                              dt: float=0.2,
+                              com: bool=False,
+                              plot_msd: bool=False,
                               addnl_anions: Optional[dict]=None,
                               mp: bool=True,
-                              xc: str="GGA_GGA+U"
+                              xc: str="GGA_GGA+U",
+                              tag: Optional[str]=None, 
                               ) -> pd.DataFrame:
         """Extracts features from a list of material's SummaryDoc objects.
 
@@ -388,8 +393,12 @@ class FetchMaterials:
                 f"B Valence p Band Center {suffix}",
                 f"B Conduction p Band Center {suffix}",
             ]
-        intercalation_cols.append("Intercalation Stability")
-        df = pd.DataFrame(columns=base_cols+intercalation_cols) 
+        diffusion_cols = []
+        for ratio in li_m_ratios:
+            for temperature in temperatures:
+                diffusion_cols.append(f"Li Diffusion Coefficient @ {ratio:.2f} Li/M and {temperature} K")
+        stability_cols = ["Intercalation Stability"]
+        df = pd.DataFrame(columns=base_cols+intercalation_cols+diffusion_cols+stability_cols) 
         for result in results:
             material = str(result.material_id)
             atoms = result.atoms
@@ -408,20 +417,30 @@ class FetchMaterials:
                 dos_data = [np.nan]*19
             data = ([result.material_id, result.formula_pretty, result.composition, result.structure] 
                     + lattice_parameters + [max_void_radius] + distances + [result.band_gap] + dos_data[1:])
-            if calc:
-                intercalation_data = features.get_intercalation_data(
-                    li_m_ratios=li_m_ratios,
-                    li_m_ratio_tol=li_m_ratio_tol,
-                    mu_li=mu_li,
-                    custom_n_m=custom_n_m,
-                    sampling_size=sampling_size,
-                    seed=seed,
-                    li_atom_cutoff=li_atom_cutoff,
-                    li_li_cutoff=li_li_cutoff
-                )
-                data = data + intercalation_data
-            else:
-                data = data + [np.nan]*(len(intercalation_cols)-1)
+            intercalation_data = features.get_intercalation_data(
+                li_m_ratios=li_m_ratios,
+                li_m_ratio_tol=li_m_ratio_tol,
+                mu_li=mu_li,
+                custom_n_m=custom_n_m,
+                sampling_size=sampling_size,
+                seed=seed,
+                li_atom_cutoff=li_atom_cutoff,
+                li_li_cutoff=li_li_cutoff
+            )
+            data = data + intercalation_data
+            diffusion_data = []
+            diff_coeffs = features.get_diffusion_data(
+                li_m_ratios=li_m_ratios,
+                temperatures=temperatures,
+                msd_col_idx=msd_col_idx,
+                dt=dt,
+                com=com,
+                plot=plot_msd
+            )
+            for ratio in li_m_ratios:
+                for temperature in temperatures:
+                    diffusion_data.append(diff_coeffs.get((ratio, temperature), np.nan))
+            data = data + diffusion_data
             if material.startswith("mp-"):
                 decomposition_data = features.get_intercalation_stability(api_key=self.api_key, 
                                                                             addnl_anions=addnl_anions,

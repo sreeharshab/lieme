@@ -6,6 +6,8 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy.spatial import Voronoi, _qhull
+from sklearn.metrics import r2_score
+from matplotlib import pyplot as plt
 import ase
 from ase import Atoms
 from ase.io import read, Trajectory
@@ -138,7 +140,7 @@ class GetFeatures:
             logging.info(f"Material: {self.material}, Formula: {self.formula}")
             logged = True
         if atoms is not None and len(atoms) < 20:
-            logging.warning(f"The provided Atoms object for {material} has less than 10 atoms. "
+            logging.warning(f"The provided Atoms object for {material} has less than 20 atoms. "
                             "Repeating it to avoid errors during feature extraction.")
             atoms = repeat_to_n_atoms(atoms, n_atoms=20)
         self.atoms = atoms
@@ -150,21 +152,25 @@ class GetFeatures:
             for base_path in addnl_dir_paths:
                 target_dir = os.path.join(base_path, self.material)
                 if os.path.exists(target_dir):
-                    os.chdir(target_dir)
+                    self.material_dir = target_dir
                     found = True
                     break
         if not found:
-            target_dir = os.path.join(self._root, self.material)
-            os.makedirs(target_dir, exist_ok=True)
-            os.chdir(target_dir)
+            self.material_dir = os.path.join(self._root, self.material)
+            os.makedirs(self.material_dir, exist_ok=True)
         try:
+            os.chdir(self.material_dir)
             self.relaxed_atoms, self.energy = get_relaxed_atoms_and_energy(atoms=atoms, calc=calc, fmax=fmax)
-        except AssertionError:
+            os.chdir(self._root)
+        except (AssertionError, IOError):
             # If you pass atoms, but do not pass calc and there is no calculation directory!
             # This prevents errors when GetFeatures is used in mpfetch to perform compositional
             # and structural filtering of materials.
-            self.return_to_root()
-            os.rmdir(target_dir)
+            try:
+                os.rmdir(self.material_dir)
+            except OSError:
+                # When Energy_calculation directory is empty, but other directories are not empty!
+                pass
             self.relaxed_atoms = atoms
         if not logged and self.relaxed_atoms is not None:
             self.formula, self.metals, self.bridging_elements = get_formula_m_b(self.relaxed_atoms)
@@ -263,17 +269,19 @@ class GetFeatures:
             m_b_distances.append(distances[[atoms[i].symbol in self.bridging_elements for i in indices]].mean())
         return [round(np.mean(li_m_distances, axis=0),3), round(np.mean(li_b_distances, axis=0),3), round(np.mean(m_b_distances, axis=0),3)]
     
-    def get_li_m_b_charges(self, dir_name: str="Bader_calculation") -> List[float]:
+    def get_li_m_b_charges(self, dir_name: str=None) -> List[float]:
         """Computes the average charges on Li, M, and B atoms using Bader analysis from the specified directory. 
             Either `with_charges.traj` or `ACF.dat` should be present in the directory.
 
         Args:
-            dir_name (str, optional): Name of the directory. Defaults to "Bader_calculation".
+            dir_name (str, optional): Name of the directory. Defaults to os.path.join(
+                self.material_dir, "Bader_calculation").
 
         Returns:
             List[float]: The average charges of [Li, M, B].
         """
-        local_root = os.getcwd()
+        if dir_name is None:
+            dir_name = os.path.join(self.material_dir, "Bader_calculation")
         try:
             os.chdir(dir_name)
             try:
@@ -297,10 +305,10 @@ class GetFeatures:
         except FileNotFoundError:
             return [np.nan]*3
         finally:
-            os.chdir(local_root)
+            os.chdir(self._root)
     
     def get_dos_data(self, 
-                     dir_name: str="Electronic_calculation", 
+                     dir_name: str=None, 
                      dos: Optional[CompleteDos]=None,
                      energy_range: Optional[List[float]]=None
                      ) -> List[float]:
@@ -308,7 +316,8 @@ class GetFeatures:
             Either `DOSCAR` or `vasprun.xml` should be present in the directory.
 
         Args:
-            dir_name (str, optional): Name of the directory. Defaults to "Electronic_calculation".
+            dir_name (str, optional): Name of the directory. Defaults to os.path.join(
+                self.material_dir, "Electronic_calculation").
             dos (Optional[CompleteDos], optional): CompleteDos object from which band gap 
                 and band centers are retrieved. This is an internal parameter. Defaults to None.
             energy_range (Optional[List[float]], optional): Custom energy range wrt fermi level to 
@@ -387,7 +396,8 @@ class GetFeatures:
                         metal_p_band_centers + metal_d_band_centers + brid_p_band_centers)
             except Exception:
                 return [np.nan]*19   
-        local_root = os.getcwd()
+        if dir_name is None:
+            dir_name = os.path.join(self.material_dir, "Electronic_calculation")
         try:
             os.chdir(dir_name)
             if os.path.exists("DOSCAR"):
@@ -418,7 +428,7 @@ class GetFeatures:
         except FileNotFoundError:
             return [np.nan]*19
         finally:
-            os.chdir(local_root)
+            os.chdir(self._root)
     
     def get_intercalation_values(self, 
                                  atoms: float, 
@@ -430,6 +440,7 @@ class GetFeatures:
                                  ) -> List[float]:
         """Internal method to compute Li intercalation prerequisites.
         """
+        local_root = os.getcwd()
         volume_with_li = atoms_with_li.get_volume()
         n_li = sum(1 for atom in atoms_with_li if atom.symbol=="Li") - sum(1 for atom in atoms if atom.symbol=="Li")
         if n_li==0:
@@ -438,8 +449,9 @@ class GetFeatures:
         li_energy = round((energy_with_li-energy-n_li*mu_li)/(n_li),3)
         volume_change = (volume_with_li - volume)/volume
         li_m_b_distances = self.get_li_m_b_distances(atoms=atoms_with_li)
-        li_m_b_charges = self.get_li_m_b_charges(dir_name="bader")
-        b_val_cond_band_centers = self.get_dos_data(dir_name="dos")[17:19]
+        li_m_b_charges = self.get_li_m_b_charges(dir_name=os.path.join(local_root, "bader"))
+        b_val_cond_band_centers = self.get_dos_data(dir_name=os.path.join(local_root, "dos"))[17:19]
+        os.chdir(local_root)
         return [li_energy, volume_change]+li_m_b_distances+li_m_b_charges+b_val_cond_band_centers
     
     def get_intercalation_data(self,
@@ -447,7 +459,7 @@ class GetFeatures:
                                li_m_ratio_tol: float=0.1, 
                                mu_li: float=-2.076286119,
                                custom_n_m: Optional[dict]=None,
-                               sampling_size: int=30,
+                               sampling_size: int=50,
                                seed: int=10,
                                li_atom_cutoff: float=1.7,
                                li_li_cutoff: float=1.0,
@@ -466,7 +478,7 @@ class GetFeatures:
                 Li intercalation energies. Defaults to -2.076286119 eV/atom (PBE functional).
             custom_n_m (Optional[dict], optional): Custom number of metal atoms present 
                 in a material. Defaults to None.
-            sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
+            sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 50.
             seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
             li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
             li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
@@ -475,7 +487,7 @@ class GetFeatures:
         Returns:
             List[float]: Li intercalation features.
         """
-        local_root = os.getcwd()
+        os.chdir(self.material_dir)
         atoms = self.relaxed_atoms
         energy = atoms.get_potential_energy()
         volume = atoms.get_volume()
@@ -577,7 +589,147 @@ class GetFeatures:
                 data[ratio] = self.get_intercalation_values(atoms, energy, volume, atoms_with_li, energy_with_li, mu_li)
             return sum([data[ratio] for ratio in li_m_ratios], [])
         finally:
-            os.chdir(local_root)
+            os.chdir(self._root)
+    
+    def get_diffusion_data(self, 
+                            li_m_ratios: List[float]=[0.25],
+                            temperatures: List[float] = [1000, 1500],
+                            msd_col_idx: int=7,
+                            dt: float=0.2,
+                            com: bool=False,
+                            interpolate_arrhenius: bool=False,
+                            plot: bool=False,
+                            ) -> dict:
+        """Calculates the Li diffusion coefficients for the material.
+
+        Args:
+            li_m_ratios (List[float], optional): List of Li/M ratios for which Li diffusion 
+                coefficients are to be calculated. Defaults to [0.25].
+            temperatures (List[float], optional): List of temperatures for which Li diffusion 
+                coefficients are to be calculated. Defaults to [1000, 1500].
+            msd_col_idx (int, optional): Column index in LAMMPS log file for MSD values. Defaults to 7.
+            dt (float, optional): Timestep for each frame in log file in ps. Defaults to 0.2.
+            com (bool, optional): Whether to use center of mass corrected MSD. Defaults to False.
+            interpolate_arrhenius (bool, optional): Whether to interpolate missing diffusion coefficients 
+                with Arrhenius equation. Defaults to False.
+            plot (bool, optional): Whether to plot the MSD vs time graph and the Arrhenius graph. Defaults to False.
+
+        Returns:
+            dict: Li diffusion coefficients for the specified Li/M ratios and temperatures as a dictionary.
+                For example, {(0.25, 1000): 1e-6, (0.25, 1500): 5e-6} where keys are (Li/M ratio, temperature) 
+                tuples and values are the corresponding diffusion coefficients in Å²/ps.
+        """
+        os.chdir(self.material_dir)
+        try:
+            os.chdir("Diffusion_calculation")
+        except FileNotFoundError:
+            logging.warning(f"Diffusion_calculation directory does not exist at `{os.getcwd()}`. "
+                            "Taking diffusion coefficients as NaN...")
+            for ratio in li_m_ratios:
+                for temperature in temperatures:
+                    diff_coeffs[(ratio, temperature)] = np.nan
+            return diff_coeffs
+        diff_coeffs = {}
+        if com:
+            msd_col_idx = msd_col_idx+1
+        for ratio in li_m_ratios:
+            ratio_diff_coeffs = {}
+            os.chdir(f"{ratio}_Li_M")
+            available_temperatures = sorted([i for i in os.walk(".")][0][1])
+            folder_map = {float(folder): folder for folder in available_temperatures}
+            available_temperatures = list(folder_map.keys())
+            missing_temperatures = list(set(temperatures) - set(available_temperatures))
+            for temperature in available_temperatures:
+                try:
+                    d_list = []
+                    r2_list = []
+                    os.chdir(f"{folder_map[temperature]}")
+                    oswalk = [i for i in os.walk(".")]
+                    runs = sorted(oswalk[0][1])
+                    if plot:
+                        fig = plt.figure(figsize=(10, 6))
+                    for run in runs:
+                        os.chdir(run)
+                        start = False
+                        time, msd_values = [], []
+                        count = 0
+                        with open("log.lammps", "r") as f:
+                            for line in f:
+                                if "Step" in line and "c_msdli[4]" in line:
+                                    start = True
+                                    continue
+                                if start:
+                                    try:
+                                        parts = line.split()
+                                        msd_values.append(float(parts[msd_col_idx]))
+                                        time.append(dt*count)
+                                        count+=1
+                                    except (IndexError, ValueError):
+                                        break
+                        time = np.array(time)
+                        msd_values = np.array(msd_values)
+                        slope = np.sum(time*msd_values)/np.sum(time**2) # Linear fit passing through (0,0)
+                        coeffs = [slope, 0]
+                        msd_fit = np.polyval(coeffs, time)
+                        r2 = r2_score(msd_values, msd_fit)
+                        r2_list.append(r2)
+                        d = coeffs[0]/6
+                        d_list.append(d)
+                        if plot:
+                            line = plt.plot(time, msd_values, label=f"Run {run[-1]}, D = {d:.2e} Å²/ps", linewidth=2.5)
+                            plt.plot(time, msd_fit, label=rf"Run {run[-1]} Linear Fit, $\mathrm{{R}}^2$ = {r2:.2f}", color=line[0].get_color(), linestyle="--", linewidth=2.5)
+                        os.chdir("../")
+                    if np.mean(r2_list) < 0.96:
+                        logging.warning(f"MSD of Li at {ratio} Li/M and {temperature} K deviates from linear behaviour, check your calculation!")
+                    ratio_diff_coeffs[temperature] = np.mean(d_list)
+                    if plot:
+                        ax = fig.gca()
+                        ax.tick_params(labelsize=12)
+                        for axis in ["top", "bottom", "left", "right"]:
+                            ax.spines[axis].set_linewidth(1.5)
+                        ax.tick_params(bottom = True, top = True, left = True, right = True)
+                        ax.tick_params(axis = "x", direction = "in")
+                        ax.tick_params(axis = "y", direction = "in")
+                        ax.ticklabel_format(useOffset=False)
+                        plt.xlabel("Time (ps)")
+                        plt.ylabel("MSD ($Å^2$)")
+                        plt.legend(frameon=False, loc="best", fontsize=12)
+                        plt.savefig("msd.png", dpi=150, bbox_inches="tight")
+                        plt.close()
+                    os.chdir("../")
+                except Exception:
+                    logging.warning(f"Diffusion data does not exist/is not completed for {ratio} Li/M at {temperature} K. "
+                                    "Taking diffusion coefficient as NaN...")
+                    ratio_diff_coeffs[temperature] = np.nan
+                if temperature in temperatures:
+                    diff_coeffs[(ratio, temperature)] = ratio_diff_coeffs[temperature]
+            ratio_diff_coeffs = {k: v for k, v in ratio_diff_coeffs.items() if not np.isnan(v)}
+            if missing_temperatures!=[] and len(ratio_diff_coeffs) >= 2 and interpolate_arrhenius is True:
+                ts = np.array(available_temperatures)
+                ds = np.array([ratio_diff_coeffs[t] for t in ts])
+                inv_ts = 1/ts
+                log_ds = np.log(ds)
+                arrhenius_coeffs = np.polyfit(inv_ts, log_ds, 1)
+                for temperature in missing_temperatures:
+                    diff_coeffs[(ratio, temperature)] = np.exp(arrhenius_coeffs[1] + arrhenius_coeffs[0]/temperature)
+                if plot:
+                    plt.figure(figsize=(8, 6))
+                    plt.plot(inv_ts, log_ds, "o-", markersize=8, linewidth=2.5)
+                    plt.xlabel("1/T (K$^{-1}$)", fontsize=12)
+                    plt.ylabel("log(D ($Å^2$/ps))", fontsize=12)
+                    plt.title(f"Arrhenius Plot for {self.material}", fontsize=14)
+                    fit_line = np.poly1d(arrhenius_coeffs)
+                    plt.plot(inv_ts, fit_line(inv_ts), "--", linewidth=2.5, 
+                        label=f"Linear fit: Slope={arrhenius_coeffs[0]:.2f}; Intercept={arrhenius_coeffs[1]:.2f}", alpha=0.7)
+                    plt.legend(frameon=False, loc="best", fontsize=12)
+                    plt.savefig(f"arrhenius.png", dpi=300, bbox_inches="tight")
+                    plt.close()
+            else:
+                for temperature in missing_temperatures:
+                    diff_coeffs[(ratio, temperature)] = np.nan
+            os.chdir("../")
+        os.chdir(self._root)
+        return diff_coeffs
     
     def get_intercalation_stability(self, 
                                     api_key: str, 
@@ -717,118 +869,73 @@ class GetFeatures:
         else:
             raise ValueError("Anions in the composition could not be detected. Please add relevant anions to the anions dict!")
     
-    def get_data(self, 
-                 custom_cutoffs: Optional[dict]=None,
-                 energy_range: Optional[List[float]]=None,
-                 li_m_ratios: List[float]=[0.25],
-                 li_m_ratio_tol: float=0.1,
-                 mu_li: float=-2.076286119,
-                 custom_n_m: Optional[dict]=None,
-                 sampling_size: int=30,
-                 seed: int=10,
-                 li_atom_cutoff: float=1.7,
-                 li_li_cutoff: float=1.0,
-                 fhandle: Optional[IO]=None,
-                 api_key: Optional[str]=None,
-                 addnl_anions: Optional[dict]=None,
-                 mp: bool=False,
-                 xc: str="GGA_GGA+U"
-                 ) -> List[float]:
+    def get_data(self, **kwargs) -> List[float]:
         """Returns the extracted features as a list.
 
         Args:
-            custom_cutoffs (Optional[dict], optional): Custom neighbor list cutoffs for 
-                different elements. Defaults to None.
-            energy_range (Optional[List[float]], optional): Custom energy range wrt fermi level to 
-                calculate band centers. Defaults to None.
-            li_m_ratios (List[float], optional): List of Li/M ratios for which Li intercalation 
-                features are to be calculated. Defaults to [0.25].
-            li_m_ratio_tol (float, optional): Tolerance for Li/M ratio matching when reading from existing
-                intercalation directories. Defaults to 0.1.
-            mu_li (float, optional): The chemical potential of Li used to calculate the 
-                Li intercalation energies. Defaults to -2.076286119 eV/atom.
-            custom_n_m (Optional[dict], optional): Custom number of metal atoms present in 
-                a material. Defaults to None.
-            sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
-            seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
-            li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
-            li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
-            fhandle (Optional[IO], optional): File handle to write the Li intercalation data. Defaults to None.
-            api_key (Optional[str], optional): API key to access the Materials Project database.
-            addnl_anions (Optional[dict], optional): Additional anions other than the default ones to be 
-                considered during decomposition. Defaults to None.
-            mp (bool, optional): Whether to obtain the energy of the material itself from Materials Project. 
-                If False, the energy of the material is obtained using self.energy. Defaults to False.
-            xc (str, optional): Exchange-correlation functional used to calculate the energy of the material 
-                in Materials Project. Defaults to "GGA_GGA+U".
+            Refer to other methods for details on kwargs.
 
         Returns:
             List[float]: Extracted features.
         """
+        material_dir = self.material_dir
         self.lattice_parameters = list(self.relaxed_atoms.cell.cellpar()[0:3]/self.relaxed_atoms.get_volume())
         self.max_void_radius = self.get_max_void_radius()
-        self.distances = self.get_li_m_b_distances(atoms=self.relaxed_atoms, custom_cutoffs=custom_cutoffs)
+        self.distances = self.get_li_m_b_distances(atoms=self.relaxed_atoms, custom_cutoffs=kwargs.get("custom_cutoffs", None))
         self.charges = self.get_li_m_b_charges()
         if all(np.isnan(self.charges)):
-            logging.warning(f"`Bader_calculation` does not exist/is not completed at `{os.getcwd()}`. Taking charges as NaN...")
-        self.dos_data = self.get_dos_data(energy_range=energy_range)
+            logging.warning(f"`Bader_calculation` does not exist/is not completed at `{material_dir}`. Taking charges as NaN...")
+        self.dos_data = self.get_dos_data(energy_range=kwargs.get("energy_range", None))
         if all(np.isnan(self.dos_data)):
-            logging.warning(f"`Electronic_calculation` does not exist/is not completed at `{os.getcwd()}`. "
+            logging.warning(f"`Electronic_calculation` does not exist/is not completed at `{material_dir}`. "
                             "Taking band gap and band centers as NaN...")
-        self.intercalation_data = self.get_intercalation_data(li_m_ratios=li_m_ratios,
-                                                            li_m_ratio_tol=li_m_ratio_tol,
-                                                            mu_li=mu_li,
-                                                            custom_n_m=custom_n_m,
-                                                            sampling_size=sampling_size,
-                                                            seed=seed,
-                                                            li_atom_cutoff=li_atom_cutoff,
-                                                            li_li_cutoff=li_li_cutoff,
-                                                            fhandle=fhandle,
+        self.intercalation_data = self.get_intercalation_data(li_m_ratios=kwargs.get("li_m_ratios", [0.25]),
+                                                            li_m_ratio_tol=kwargs.get("li_m_ratio_tol", 0.1),
+                                                            mu_li=kwargs.get("mu_li", -2.076286119),
+                                                            custom_n_m=kwargs.get("custom_n_m", None),
+                                                            sampling_size=kwargs.get("sampling_size", 50),
+                                                            seed=kwargs.get("seed", 10),
+                                                            li_atom_cutoff=kwargs.get("li_atom_cutoff", 1.7),
+                                                            li_li_cutoff=kwargs.get("li_li_cutoff", 1.0),
+                                                            fhandle=kwargs.get("fhandle", None)
                                                             )
         if all(np.isnan(self.intercalation_data)):
-            logging.warning(f"`Intercalation` does not exist/is not completed at `{os.getcwd()}`. " 
+            logging.warning(f"`Intercalation` does not exist/is not completed at `{material_dir}`. " 
                             "Taking Li intercalation features as NaN...")
+        self.diffusion_data = []
+        diff_coeffs = self.get_diffusion_data(li_m_ratios=kwargs.get("li_m_ratios", [0.25]),
+                                            temperatures=kwargs.get("temperatures", [1000, 1500]),
+                                            msd_col_idx=kwargs.get("msd_col_idx", 7),
+                                            dt=kwargs.get("dt", 0.2),
+                                            com=kwargs.get("com", False),
+                                            plot=kwargs.get("plot_msd", False)
+                                            )
+        for ratio in kwargs.get("li_m_ratios", [0.25]):
+            for temperature in kwargs.get("temperatures", [1000, 1500]):
+                self.diffusion_data.append(diff_coeffs.get((ratio, temperature), np.nan))
         self.data = ([self.material, self.formula, self.structure] 
                      + self.lattice_parameters + [self.max_void_radius] 
                      + self.distances + self.charges + self.dos_data 
-                     + self.intercalation_data)
-        if api_key:
-            self.decomposition_data = self.get_intercalation_stability(api_key=api_key, 
-                                                                       addnl_anions=addnl_anions, 
-                                                                       mp=mp, 
-                                                                       xc=xc)
+                     + self.intercalation_data + self.diffusion_data)
+        if kwargs.get("api_key", None):
+            self.stability_data = self.get_intercalation_stability(api_key=kwargs.get("api_key"), 
+                                                                       addnl_anions=kwargs.get("addnl_anions", None),
+                                                                       mp=kwargs.get("mp", False),
+                                                                       xc=kwargs.get("xc", "GGA_GGA+U")
+                                                                       )   
         else:
-            self.decomposition_data = np.nan
-        self.data.append(self.decomposition_data)
+            self.stability_data = np.nan
+        self.data.append(self.stability_data)
         return self.data
-    
-    def return_to_root(self):
-        """Returns to the root directory.
-        """
-        os.chdir(self._root)
 
-def get_material_features(materials: List[str], 
-                          atoms_list: Optional[List[Atoms]]=None, 
-                          tag: Optional[str]=None, 
-                          fhandle: Optional[IO]=None, 
-                          addnl_dir_paths: Optional[List[str]]=None,
-                          addnl_folder_paths: Optional[List[str]]=None,
-                          custom_cutoffs: Optional[dict]=None,
-                          energy_range: Optional[List[float]]=None,
+def get_material_features(materials: List[str],
+                          atoms_list: Optional[List[Atoms]]=None,
                           calc: Optional[Calculator]=None,
                           fmax: float=0.05,
-                          li_m_ratios: List[float]=[0.25],
-                          li_m_ratio_tol: float=0.1,
-                          mu_li: float=-2.076286119,
-                          custom_n_m: Optional[dict]=None,
-                          sampling_size: int=30,
-                          seed: int=10,
-                          li_atom_cutoff: float=1.7,
-                          li_li_cutoff: float=1.0,
-                          api_key: Optional[str]=None,
-                          addnl_anions: Optional[dict]=None,
-                          mp: bool=False,
-                          xc: str="GGA_GGA+U"
+                          tag: Optional[str]=None,
+                          addnl_dir_paths: Optional[List[str]]=None,
+                          addnl_folder_paths: Optional[List[str]]=None,
+                          **kwargs
                           ) -> pd.DataFrame:
     """Extracts features for a list of materials using the GetFeatures class.
 
@@ -838,37 +945,15 @@ def get_material_features(materials: List[str],
         atoms_list (Optional[List[Atoms]], optional): List of ASE Atoms objects corresponding
             to the materials. If not provided, the Atoms objects will be read from the
             calculation directories. Defaults to None.
-        tag (Optional[str], optional): Features are saved in a file named `material_features_{tag}.pkl` 
-            if `tag` is provided, otherwise in `material_features.pkl`. Defaults to None.
-        fhandle (Optional[IO], optional): File handle to write the Li intercalation data. Defaults to None.
-        addnl_dir_paths (Optional[List[str]], optional): Additional directory paths other than 
-            the root where the material's calculations can be found. Defaults to None.
-        custom_cutoffs (Optional[dict], optional): Custom neighbor list cutoffs for 
-            different elements. Defaults to None.
-        energy_range (Optional[List[float]], optional): Custom energy range wrt fermi level to calculate 
-            band centers. Defaults to None.
         calc (Optional[Calculator], optional): ASE Calculator object to be used for
             relaxation if calculation files are not found. Defaults to None.
         fmax (float, optional): Maximum force criterion for relaxation. Defaults to 0.05 eV/Å.
-        li_m_ratios (List[float], optional): List of Li/M ratios for which Li intercalation 
-            features are to be calculated. Defaults to [0.25].
-        li_m_ratio_tol (float, optional): Tolerance for Li/M ratio matching when reading from existing
-            intercalation directories. Defaults to 0.1.
-        mu_li (float, optional): The chemical potential of Li used to calculate the Li 
-            intercalation energies. Defaults to -2.076286119 eV/atom.
-        custom_n_m (Optional[dict], optional): Custom number of metal atoms present in a material. Defaults to None.
-        sampling_size (int, optional): Number of random intercalated structures to sample. Defaults to 30.
-        seed (int, optional): Random seed for sampling intercalated structures. Defaults to 10.
-        li_atom_cutoff (float, optional): Li-atom cutoff distance in intercalated structures. Defaults to 1.7 Å.
-        li_li_cutoff (float, optional): Li-Li cutoff distance in intercalated structures. Defaults to 1.0 Å.
-        api_key (Optional[str], optional): API key to access the Materials Project database.
-        addnl_anions (Optional[dict], optional): Additional anions other than the default ones to be 
-            considered during decomposition. Defaults to None.
-        mp (bool, optional): Whether to obtain the energy of the material itself from Materials Project. 
-            If False, the energy of the material is obtained using self.energy. Defaults to False.
-        xc (str, optional): Exchange-correlation functional used to calculate the energy of the material 
-            in Materials Project. Defaults to "GGA_GGA+U".
-        
+        tag (Optional[str], optional): Features are saved in a file named `material_features_{tag}.pkl` 
+            if `tag` is provided, otherwise in `material_features.pkl`. Defaults to None.
+        addnl_dir_paths (Optional[List[str]], optional): Additional directory paths other than 
+            the root where the material's calculations can be found. Defaults to None.
+        Refer to other methods for details on kwargs.
+            
     Returns:
         pd.DataFrame: Features for all materials.
     """
@@ -884,7 +969,7 @@ def get_material_features(materials: List[str],
         "M Conduction d Band Center", "B p Band Center", "B Valence p Band Center", "B Conduction p Band Center"
     ]
     intercalation_cols = []
-    for ratio in li_m_ratios:
+    for ratio in kwargs.get("li_m_ratios", [0.25]):
         suffix = f"@ {ratio:.2f} Li/M"
         intercalation_cols += [
             f"Li Intercalation Energy {suffix}",
@@ -898,8 +983,12 @@ def get_material_features(materials: List[str],
             f"B Valence p Band Center {suffix}",
             f"B Conduction p Band Center {suffix}",
         ]
-    intercalation_cols.append("Intercalation Stability")
-    df = pd.DataFrame(columns=base_cols+intercalation_cols)
+    diffusion_cols = []
+    for ratio in kwargs.get("li_m_ratios", [0.25]):
+        for temperature in kwargs.get("temperatures", [1000, 1500]):
+            diffusion_cols.append(f"Li Diffusion Coefficient @ {ratio:.2f} Li/M and {temperature} K")
+    stability_cols = ["Intercalation Stability"]
+    df = pd.DataFrame(columns=base_cols+intercalation_cols+diffusion_cols+stability_cols)
     atoms_list = atoms_list if atoms_list is not None else [None]*len(materials)
     for material, atoms in zip(materials, atoms_list):
         features = GetFeatures(material=material, 
@@ -907,26 +996,9 @@ def get_material_features(materials: List[str],
                                calc=calc,
                                fmax=fmax,
                                addnl_dir_paths=addnl_dir_paths)
-        features.get_data(
-            custom_cutoffs=custom_cutoffs,
-            energy_range=energy_range,
-            li_m_ratios=li_m_ratios,
-            li_m_ratio_tol=li_m_ratio_tol,
-            mu_li=mu_li,
-            custom_n_m=custom_n_m,
-            sampling_size=sampling_size,
-            seed=seed,
-            li_atom_cutoff=li_atom_cutoff,
-            li_li_cutoff=li_li_cutoff,
-            fhandle=fhandle,
-            api_key=api_key,
-            addnl_anions=addnl_anions,
-            mp=mp,
-            xc=xc
-        )
+        features.get_data(**kwargs)
         next_index = len(df)
         df.loc[next_index] = features.data
-        features.return_to_root()
     df = StrToComposition().featurize_dataframe(df, "formula")
     ep_feat = ElementProperty.from_preset(preset_name="magpie")
     df = ep_feat.featurize_dataframe(df, col_id="composition") 
@@ -946,7 +1018,7 @@ class Intercalation:
                  fmax: float,
                  li_m_ratio: float,
                  custom_n_m: Optional[dict]=None,
-                 sampling_size: int=30,
+                 sampling_size: int=50,
                  seed: int=10,
                  li_atom_cutoff: float=1.7,
                  li_li_cutoff: float=1.0
@@ -1032,9 +1104,10 @@ class Intercalation:
         if os.path.exists(f"{dir}/sampling_{li_m_ratio}.traj"):
             try:
                 traj_read = Trajectory(traj_path, "r")
+                mode = "a"
             except ase.io.ulm.InvalidULMFileError:
                 traj_read = None
-            mode = "a"
+                mode = "w"
         else:
             mode = "w"
         traj = Trajectory(f"{dir}/sampling_{li_m_ratio}.traj", mode)
@@ -1044,7 +1117,7 @@ class Intercalation:
         if not structures_with_li:
             return None, None
         for index, structure_with_li in enumerate(structures_with_li):
-            if index < len(traj):
+            if index < len(traj) and traj_read is not None:
                 atoms_list_with_li.append(traj_read[index])
                 energies_with_li.append(traj_read[index].get_potential_energy())
                 continue
