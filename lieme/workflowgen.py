@@ -5,6 +5,7 @@ import logging
 import subprocess
 from typing import List, Dict, Optional
 import numpy as np
+import ase
 from ase import Atoms
 from ase.io import read, write, Trajectory
 from ase.calculators.calculator import Calculator
@@ -65,7 +66,7 @@ class WorkFlowGenerator:
         self.material_dir = os.path.join(self.root_dir, self.material)
         self.seed = seed
         if len(atoms) < 20:
-            logging.warning(f"The provided Atoms object for {material} has less than 10 atoms. "
+            logging.warning(f"The provided Atoms object for {material} has less than 20 atoms. "
                             "Repeating it to avoid errors during Li intercalation/deintercalation" \
                             " and feature extraction.")
             atoms = repeat_to_n_atoms(atoms, n_atoms=20)
@@ -84,22 +85,7 @@ class WorkFlowGenerator:
         self.custom_n_m = custom_n_m
         self.sampling_size = sampling_size
         self.li_atom_cutoff = li_atom_cutoff
-        self.li_li_cutoff = li_li_cutoff    
-    
-    def create_dirs(self) -> Dict[str, str]:
-        material_dir = self.material_dir
-        dirs = {
-            "material": material_dir,
-            "energy": os.path.join(material_dir, "Energy_calculation"),
-            "electronic": os.path.join(material_dir, "Electronic_calculation"),
-            "bader": os.path.join(material_dir, "Bader_calculation"),
-            "intercalation": os.path.join(material_dir, "Intercalation"),
-            "diffusion": os.path.join(material_dir, "Diffusion_calculation")
-        }
-        for dir in dirs.values():
-            os.makedirs(dir, exist_ok=True)
-        self.dirs = dirs
-        return dirs
+        self.li_li_cutoff = li_li_cutoff
     
     def get_best_deintercalated_structure(self) -> Atoms:
         """This method is used to remove Li from materials which contain Li in their parent structure,
@@ -109,7 +95,22 @@ class WorkFlowGenerator:
         deintercalation_dir = os.path.join(self.material_dir, "Deintercalation")
         os.makedirs(deintercalation_dir, exist_ok=True)
         os.chdir(deintercalation_dir)
-        traj = Trajectory(f"sampling_{self.remove_li_m_ratio}.traj", "w")
+        traj_path = f"sampling_{self.remove_li_m_ratio}.traj"
+        if os.path.exists(traj_path):
+            try:
+                traj_read = Trajectory(traj_path, "r")
+                if len(traj_read) == self.remove_sampling_size:
+                    return
+                else:
+                    remaining = self.remove_sampling_size - len(traj_read)
+                    mode = "a"
+            except ase.io.ulm.InvalidULMFileError:
+                remaining = self.remove_sampling_size
+                mode = "w"
+                pass
+        else:
+            mode = "w"
+        traj = Trajectory(traj_path, mode)
         atoms = self.atoms
         seed = self.seed
         np.random.seed(seed)
@@ -121,7 +122,7 @@ class WorkFlowGenerator:
             return
         n_remove = int(round(n_li*self.remove_li_m_ratio))
         atoms_without_li_dict = {}
-        for i in range(self.remove_sampling_size):
+        for i in range(remaining):
             atoms_without_li = atoms.copy()
             idxs = np.random.choice(li_indices, size=n_remove, replace=False)
             del atoms_without_li[idxs]
@@ -153,7 +154,7 @@ class WorkFlowGenerator:
             li_atom_cutoff=self.li_atom_cutoff,
             li_li_cutoff=self.li_li_cutoff
         )
-        features.return_to_root()
+        os.chdir(self.root_dir)
         return relaxed_atoms
 
     def get_ldau_luj(self) -> Dict[int, List[float]]:
@@ -350,7 +351,8 @@ class WorkFlowGenerator:
     
     def run_energy_calc(self, atoms: Optional[Atoms]=None, dir: Optional[str]=None):
         if not dir:
-            dir = self.dirs["energy"]
+            dir = os.path.join(self.material_dir, "Energy_calculation")
+            os.makedirs(dir, exist_ok=True)
         if not atoms:
             try:
                 atoms = self.relaxed_atoms.copy()
@@ -389,7 +391,8 @@ class WorkFlowGenerator:
         if not atoms:
             atoms = self.relaxed_atoms.copy()
         if not dir:
-            dir = self.dirs["electronic"]
+            dir = os.path.join(self.material_dir, "Electronic_calculation")
+            os.makedirs(dir, exist_ok=True)
         os.chdir(dir)
         complete = False
         if os.path.exists("spc.outcar"):
@@ -450,7 +453,8 @@ class WorkFlowGenerator:
         if not atoms:
             atoms = self.relaxed_atoms.copy()
         if not dir:
-            dir = self.dirs["bader"]
+            dir = os.path.join(self.material_dir, "Bader_calculation")
+            os.makedirs(dir, exist_ok=True)
         os.chdir(dir)
         if os.path.exists("AECCAR0") and os.path.exists("AECCAR2"):
             pass
@@ -482,14 +486,16 @@ class WorkFlowGenerator:
         os.chdir(self.root_dir)
 
     def run_intercalation_calc(self, n_lowest: int=3):
-        os.chdir(self.dirs["intercalation"])
+        dir = os.path.join(self.material_dir, "Intercalation")
+        os.makedirs(dir, exist_ok=True)
+        os.chdir(dir)
         nlidirs = [entry.name for entry in os.scandir("./") if entry.is_dir()]
         nlidirs = sorted(nlidirs, key=lambda x: float(x.split("_")[0]))
         li_m_ratios = sorted(self.li_m_ratios)
         self.best_atoms_with_li = {}
         for idx, nlidir in enumerate(nlidirs):
             traj = read(f"sampling_{li_m_ratios[idx]}.traj", index=":")
-            sub_dir = os.path.join(self.dirs["intercalation"], nlidir)
+            sub_dir = os.path.join(dir, nlidir)
             os.chdir(sub_dir)
             mlip_energies = {}
             for i, atoms in enumerate(traj):
@@ -521,6 +527,7 @@ class WorkFlowGenerator:
     
     def setup_md(self,
                  li_m_ratio: float,
+                 atoms: Optional[Atoms]=None,
                  n_atoms: int=200,
                  temperatures: list=[1000],
                  lammps_in_script: Optional[str]=None,
@@ -530,10 +537,15 @@ class WorkFlowGenerator:
                  model: Optional[str]=None,
                  n_runs: int=3,
                  ):
-        os.chdir(self.dirs["diffusion"])
-        atoms_with_li = self.best_atoms_with_li[li_m_ratio]
+        dir = os.path.join(self.material_dir, "Diffusion_calculation")
+        os.makedirs(dir, exist_ok=True)
+        os.chdir(dir)
+        if not atoms:
+            atoms_with_li = self.best_atoms_with_li[li_m_ratio]
+        else:
+            atoms_with_li = atoms
         atoms_with_li = repeat_to_n_atoms(atoms_with_li, n_atoms=n_atoms)
-        ratio_dir = os.path.join(self.dirs["diffusion"], f"{li_m_ratio}_Li_M")
+        ratio_dir = os.path.join(dir, f"{li_m_ratio}_Li_M")
         os.makedirs(ratio_dir, exist_ok=True)
         for temperature in temperatures:
             for run in range(n_runs):
@@ -632,7 +644,6 @@ class WorkFlowGenerator:
             self.setup_md(li_m_ratio=ratio, **kwargs)
     
     def run_dft_calcs(self, n_addnl_bands: int=20, n_lowest: int=3):
-        self.create_dirs()
         self.run_energy_calc()
         self.run_electronic_calc(n_addnl_bands=n_addnl_bands)
         self.run_bader_calc()
