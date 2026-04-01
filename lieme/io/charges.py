@@ -37,7 +37,7 @@ def get_atoms_with_charges() -> Atoms:
     try:
         df = pd.read_table(
             "ACF.dat",
-            delim_whitespace=True,
+            sep="\s+",
             header=0,
             skiprows=[1, latoms + 2, latoms + 3, latoms + 4, latoms + 5],
         )

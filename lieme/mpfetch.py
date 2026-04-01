@@ -311,7 +311,8 @@ class FetchMaterials:
                               msd_col_idx: int=7,
                               dt: float=0.2,
                               com: bool=False,
-                              plot_msd: bool=False,
+                              interpolate_arrhenius: bool=False,
+                              plot_diffusion: bool=False,
                               addnl_anions: Optional[dict]=None,
                               mp: bool=True,
                               xc: str="GGA_GGA+U",
@@ -435,7 +436,8 @@ class FetchMaterials:
                 msd_col_idx=msd_col_idx,
                 dt=dt,
                 com=com,
-                plot=plot_msd
+                interpolate_arrhenius=interpolate_arrhenius,
+                plot=plot_diffusion
             )
             for ratio in li_m_ratios:
                 for temperature in temperatures:

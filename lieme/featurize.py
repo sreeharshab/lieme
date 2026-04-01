@@ -679,7 +679,7 @@ class GetFeatures:
                             line = plt.plot(time, msd_values, label=f"Run {run[-1]}, D = {d:.2e} Å²/ps", linewidth=2.5)
                             plt.plot(time, msd_fit, label=rf"Run {run[-1]} Linear Fit, $\mathrm{{R}}^2$ = {r2:.2f}", color=line[0].get_color(), linestyle="--", linewidth=2.5)
                         os.chdir("../")
-                    if np.mean(r2_list) < 0.96:
+                    if np.mean(r2_list) < 0.90:
                         logging.warning(f"MSD of Li at {ratio} Li/M and {temperature} K deviates from linear behaviour, check your calculation!")
                     ratio_diff_coeffs[temperature] = np.mean(d_list)
                     if plot:
@@ -710,6 +710,10 @@ class GetFeatures:
                 inv_ts = 1/ts
                 log_ds = np.log(ds)
                 arrhenius_coeffs = np.polyfit(inv_ts, log_ds, 1)
+                fit_log_ds = np.polyval(arrhenius_coeffs, inv_ts)
+                r2 = r2_score(log_ds, fit_log_ds)
+                if r2 < 0.90:
+                    logging.warning(f"Arrhenius plot for {ratio} Li/M deviates from linear behaviour, check your calculation!")
                 for temperature in missing_temperatures:
                     diff_coeffs[(ratio, temperature)] = np.exp(arrhenius_coeffs[1] + arrhenius_coeffs[0]/temperature)
                 if plot:
@@ -718,9 +722,8 @@ class GetFeatures:
                     plt.xlabel("1/T (K$^{-1}$)", fontsize=12)
                     plt.ylabel("log(D ($Å^2$/ps))", fontsize=12)
                     plt.title(f"Arrhenius Plot for {self.material}", fontsize=14)
-                    fit_line = np.poly1d(arrhenius_coeffs)
-                    plt.plot(inv_ts, fit_line(inv_ts), "--", linewidth=2.5, 
-                        label=f"Linear fit: Slope={arrhenius_coeffs[0]:.2f}; Intercept={arrhenius_coeffs[1]:.2f}", alpha=0.7)
+                    plt.plot(inv_ts, fit_log_ds, "--", linewidth=2.5, 
+                        label=rf"Linear fit: $\mathrm{{R}}^2$ = {r2:.2f}; Slope={arrhenius_coeffs[0]:.2f}; Intercept={arrhenius_coeffs[1]:.2f}", alpha=0.7)
                     plt.legend(frameon=False, loc="best", fontsize=12)
                     plt.savefig(f"arrhenius.png", dpi=300, bbox_inches="tight")
                     plt.close()
@@ -908,7 +911,8 @@ class GetFeatures:
                                             msd_col_idx=kwargs.get("msd_col_idx", 7),
                                             dt=kwargs.get("dt", 0.2),
                                             com=kwargs.get("com", False),
-                                            plot=kwargs.get("plot_msd", False)
+                                            interpolate_arrhenius=kwargs.get("interpolate_arrhenius", False),
+                                            plot=kwargs.get("plot_diffusion", False)
                                             )
         for ratio in kwargs.get("li_m_ratios", [0.25]):
             for temperature in kwargs.get("temperatures", [1000, 1500]):
