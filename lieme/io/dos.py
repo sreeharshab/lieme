@@ -50,6 +50,7 @@ class DOS:
                 self.total_dos_up[i] = values[1]
                 if self.is_spin_polarized:
                     self.total_dos_down[i] = values[2]
+            self.dos_interval = (max(self.energies) - min(self.energies))/nedos
             partial = False
             try:
                 next(f)
@@ -80,18 +81,23 @@ class DOS:
         self.parse_doscar()
         energies_below_fermi = self.energies[self.energies<self.fermi_energy]
         energies_above_fermi = self.energies[self.energies>self.fermi_energy]
+        dos_threshold = 1e-5
         def gap_calc(dos_array):
             gap_start = None
             gap_end = None
             for energy, dos in zip(energies_below_fermi[::-1], dos_array[self.energies < self.fermi_energy][::-1]):
-                if dos > 0:
+                if dos > dos_threshold:
                     gap_start = energy
                     break
             for energy, dos in zip(energies_above_fermi, dos_array[self.energies > self.fermi_energy]):
-                if dos > 0:
+                if dos > dos_threshold:
                     gap_end = energy
                     break
             if gap_start is not None and gap_end is not None:
+                gap = gap_end - gap_start
+                tol = self.dos_interval/10
+                if abs(gap - self.dos_interval) <= tol:
+                    return 0.0
                 return gap_end - gap_start
             else:
                 return 0.0
