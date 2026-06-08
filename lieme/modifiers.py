@@ -31,6 +31,7 @@ class ResolvePartialOccupancies(ParentModifier):
                               "Li": [20, 21, ..., 29]}
             n_swaps (int): Number of site swaps to perform. Defaults to 2.
             position_tolerance (float): Distance tolerance for mapping current sites to parent sites.
+                If position_tolerance is too low or too high, the mapping will be incorrect, be careful!
         """
         super().__init__(weight=weight)
         self.parent_atoms = parent_atoms
