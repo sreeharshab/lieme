@@ -384,10 +384,16 @@ class WorkFlowGenerator:
             shutil.copy("OUTCAR", f"opt{i}.outcar")
             shutil.copy("vasp.out", f"opt{i}.out")
             shutil.copy("vasprun.xml", f"opt{i}.xml")
-        self.relaxed_atoms = atoms.copy()
+        self.relaxed_atoms = atoms
         os.chdir(self.root_dir)
 
-    def run_electronic_calc(self, atoms: Optional[Atoms]=None, dir: Optional[str]=None, n_addnl_bands: int=20):
+    def run_electronic_calc(self, 
+                            atoms: Optional[Atoms]=None, 
+                            dir: Optional[str]=None, 
+                            n_addnl_bands: int=20, 
+                            hse: bool=False, 
+                            addnl_dft_elec_settings: Optional[Dict]=None
+                            ):
         if not atoms:
             atoms = self.relaxed_atoms.copy()
         if not dir:
@@ -395,8 +401,10 @@ class WorkFlowGenerator:
             os.makedirs(dir, exist_ok=True)
         os.chdir(dir)
         complete = False
-        if os.path.exists("spc.outcar"):
-            with open("spc.outcar", "r") as f:
+        outcar = "spc.outcar"
+        vaspout = "spc.out"
+        if os.path.exists(outcar):
+            with open(outcar, "r") as f:
                 f.seek(0, 2)
                 f_size = f.tell()
                 read_size = min(1000, f_size)
@@ -406,15 +414,24 @@ class WorkFlowGenerator:
                     complete = True
         if not complete:
             calc = self.get_base_calc()
-            kpts = self.generate_kpts(atoms, dk=self.dk+20) # Higher dk for better DOS
-            calc.set(kpts=kpts, ibrion=-1, nsw=0, ismear=-5, lcharg=True, lwave=True)
-            atoms.calc = calc
-            atoms.get_potential_energy()
-            os.rename("OUTCAR", "spc.outcar")
-            os.rename("vasp.out", "spc.out")
+            if hse:
+                pass
+            else:
+                kpts = self.generate_kpts(atoms, dk=self.dk+20) # Higher dk for better DOS
+                calc.set(kpts=kpts, ibrion=-1, nsw=0, ismear=-5, lwave=True, lcharg=True)
+                atoms.calc = calc
+                atoms.get_potential_energy()
+                os.rename("OUTCAR", outcar)
+                os.rename("vasp.out", vaspout)
         complete = False
-        if os.path.exists("dos.outcar") and os.path.exists("dos.out"):
-            with open("dos.outcar", "r") as f:
+        if hse:
+            outcar = "dos_hse.outcar"
+            vaspout = "dos_hse.out"
+        else:
+            outcar = "dos.outcar"
+            vaspout = "dos.out"
+        if os.path.exists(outcar) and os.path.exists(vaspout):
+            with open(outcar, "r") as f:
                 f.seek(0, 2)
                 f_size = f.tell()
                 read_size = min(1000, f_size)
@@ -422,31 +439,68 @@ class WorkFlowGenerator:
                 end_content = f.read()
                 if "General timing and accounting informations for this job:" in end_content:
                     complete = True
-                    logging.info(f"dos.outcar already exists. Skipping {dir.split("/")[-1]}...")
+                    logging.info(f"{outcar} already exists. Skipping {dir.split("/")[-1]}...")
         if not complete:
             calc = self.get_base_calc()
-            kpts = self.generate_kpts(atoms, dk=self.dk+20)
             valence_electrons = self.get_valence_electrons(atoms)
             nelect = 0
             for atom in atoms:
                 nelect += valence_electrons[atom.symbol]
             nbands = nelect + n_addnl_bands
-            calc.set(
-                kpts=kpts,
-                ibrion=-1,
-                nsw=0,
-                ismear=-5,
-                icharg=11,
-                lorbit=11,
-                nedos=3000,
-                emax=15,
-                emin=-20,
-                nbands=nbands
-                )
+            if hse:
+                kpts = self.generate_kpts(atoms, dk=self.dk/2) # Lower dk for faster HSE calculation
+                calc.set(
+                    kpts=kpts,
+                    ### HSE settings
+                    ldau=None,
+                    ldautype=None,
+                    ldau_luj=None,
+                    lmaxmix=None,
+                    lhfcalc=True,
+                    algo="Damped",
+                    hfscreen=0.2,
+                    time=0.2,
+                    precfock="Fast",
+                    amix=0.2, # Reduce AMIX, BMIX and TIME if convergence issues arise
+                    bmix=0.0001,
+                    amix_mag=0.8,
+                    bmix_mag=0.0001,
+                    ###
+                    ibrion=-1,
+                    nsw=0,
+                    nelm=150,
+                    istart=0,
+                    prec="Accurate",
+                    ismear=0,
+                    sigma=0.05,
+                    lorbit=11,
+                    nedos=3000,
+                    emax=15,
+                    emin=-20,
+                    nbands=nbands
+                    )
+            else:
+                kpts = self.generate_kpts(atoms, dk=self.dk+20)
+                calc.set(
+                    kpts=kpts,
+                    ibrion=-1,
+                    nsw=0,
+                    ismear=-5,
+                    icharg=11,
+                    lorbit=11,
+                    nedos=3000,
+                    emax=15,
+                    emin=-20,
+                    nbands=nbands
+                    )
+            if addnl_dft_elec_settings is not None:
+            # Additional electronic settings will override defaults if there are conflicts!
+                for key, value in addnl_dft_elec_settings.items():
+                    calc.set(**{key: value})
             atoms.calc = calc
             atoms.get_potential_energy()
-            os.rename("OUTCAR", "dos.outcar")
-            os.rename("vasp.out", "dos.out")
+            os.rename("OUTCAR", outcar)
+            os.rename("vasp.out", vaspout)
         os.chdir(self.root_dir)
 
     def run_bader_calc(self, atoms: Optional[Atoms]=None, dir: Optional[str]=None):
@@ -485,7 +539,7 @@ class WorkFlowGenerator:
             subprocess.run([bader, "CHGCAR", "-ref", "CHGCAR_sum"], capture_output=True)
         os.chdir(self.root_dir)
 
-    def run_intercalation_calc(self, n_lowest: int=3):
+    def run_intercalation_calc(self, n_lowest: int=3, hse: bool=False, addnl_dft_elec_settings: Optional[Dict]=None):
         dir = os.path.join(self.material_dir, "Intercalation")
         os.makedirs(dir, exist_ok=True)
         os.chdir(dir)
@@ -506,17 +560,19 @@ class WorkFlowGenerator:
             for sample in sub_samples:
                 sub_sub_dir = os.path.join(sub_dir, sample)
                 geo_opt_dir = os.path.join(sub_sub_dir, "geo_opt")
-                dos_dir = os.path.join(sub_sub_dir, "dos")
-                bader_dir = os.path.join(sub_sub_dir, "bader")
-                os.makedirs(dos_dir, exist_ok=True)
-                os.makedirs(bader_dir, exist_ok=True)
                 atoms_with_li = read(os.path.join(geo_opt_dir, "opt.traj@-1"))
                 self.run_energy_calc(atoms=atoms_with_li, dir=geo_opt_dir) # This replaces self.relaxed_atoms with the intercalated structure!
                 dft_atoms_with_li[sample] = self.relaxed_atoms
-                self.run_electronic_calc(atoms=self.relaxed_atoms, dir=dos_dir)
-                self.run_bader_calc(atoms=self.relaxed_atoms, dir=bader_dir)
             sorted_i_dft = sorted(dft_atoms_with_li.keys(), key=lambda x: dft_atoms_with_li[x].get_potential_energy())
             best_sample = sorted_i_dft[0]
+            # Run dos and bader only for the best sample
+            sub_sub_dir = os.path.join(sub_dir, best_sample)
+            dos_dir = os.path.join(sub_sub_dir, "dos")
+            bader_dir = os.path.join(sub_sub_dir, "bader")
+            os.makedirs(dos_dir, exist_ok=True)
+            os.makedirs(bader_dir, exist_ok=True)
+            self.run_electronic_calc(atoms=dft_atoms_with_li[best_sample], dir=dos_dir, hse=hse, addnl_dft_elec_settings=addnl_dft_elec_settings)
+            self.run_bader_calc(atoms=dft_atoms_with_li[best_sample], dir=bader_dir)
             self.best_atoms_with_li[li_m_ratios[idx]] = dft_atoms_with_li[best_sample]
             rejected_samples = [str(i) for i in sorted_i_mlip[n_lowest:]]
             # Removing non-DFT relaxed samples to increase efficiency
@@ -643,11 +699,11 @@ class WorkFlowGenerator:
         for ratio in self.li_m_ratios:
             self.setup_md(li_m_ratio=ratio, **kwargs)
     
-    def run_dft_calcs(self, n_addnl_bands: int=20, n_lowest: int=3):
+    def run_dft_calcs(self, n_addnl_bands: int=20, n_lowest: int=3, hse: bool=False, addnl_dft_elec_settings: Optional[Dict]=None):
         self.run_energy_calc()
-        self.run_electronic_calc(n_addnl_bands=n_addnl_bands)
+        self.run_electronic_calc(n_addnl_bands=n_addnl_bands, hse=hse, addnl_dft_elec_settings=addnl_dft_elec_settings)
         self.run_bader_calc()
-        self.run_intercalation_calc(n_lowest=n_lowest)
+        self.run_intercalation_calc(n_lowest=n_lowest, hse=hse, addnl_dft_elec_settings=addnl_dft_elec_settings)
     
     def run(self, n_addnl_bands: int=20, n_lowest: int=3, **kwargs):
         self.run_mlip_calcs()
