@@ -297,6 +297,7 @@ class FetchMaterials:
                               custom_constraints: Optional[List[Tuple[Callable[..., bool], Dict]]]=None, 
                               custom_cutoffs: Optional[dict]=None,
                               energy_range: Optional[List[float]]=None, 
+                              plot_dos: bool=False,
                               calc: Optional[Calculator]=None, 
                               fmax: float=0.05, 
                               li_m_ratios: List[float]=[0.25], 
@@ -312,6 +313,7 @@ class FetchMaterials:
                               dt: float=0.2,
                               com: bool=False,
                               interpolate_arrhenius: bool=False,
+                              interpolation_temperatures: List[float]=None,
                               plot_diffusion: bool=False,
                               addnl_anions: Optional[dict]=None,
                               mp: bool=True,
@@ -413,7 +415,7 @@ class FetchMaterials:
             lattice_parameters = list(relaxed_atoms.cell.cellpar()[0:3]/relaxed_atoms.get_volume())
             distances = features.get_li_m_b_distances(custom_cutoffs=custom_cutoffs)
             try:
-                dos_data = features.get_dos_data(dos=result.dos, energy_range=energy_range)
+                dos_data = features.get_dos_data(dos=result.dos, energy_range=energy_range, plot=plot_dos)
             except MPRestError:
                 dos_data = [np.nan]*19
             data = ([result.material_id, result.formula_pretty, result.composition, result.structure] 
@@ -437,6 +439,7 @@ class FetchMaterials:
                 dt=dt,
                 com=com,
                 interpolate_arrhenius=interpolate_arrhenius,
+                interpolation_temperatures=interpolation_temperatures,
                 plot=plot_diffusion
             )
             for ratio in li_m_ratios:
