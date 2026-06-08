@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List, Tuple, IO, Optional
+from typing import Dict, List, Tuple, IO, Optional
 import logging
 import warnings
 import numpy as np
@@ -306,12 +306,63 @@ class GetFeatures:
             return [np.nan]*3
         finally:
             os.chdir(self._root)
-    
+
+    def plot_dos(self,
+                 energies: np.ndarray,
+                 total_dos_up: np.ndarray,
+                 total_dos_down: Optional[np.ndarray]=None,
+                 element_dos: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]]=None,
+                 energy_range: Optional[List[float]]=None,
+                 file_name: str="dos.png",
+                 ) -> None:
+        """Plots total and element-projected DOS with mirrored spin channels."""
+        energies = np.asarray(energies)
+        total_dos_up = np.asarray(total_dos_up)
+        total_dos_down = np.asarray(total_dos_down) if total_dos_down is not None else np.array([])
+        if total_dos_down.size == 0:
+            total_dos_down = np.zeros_like(total_dos_up)
+        if energy_range is not None:
+            mask = (energies >= energy_range[0]) & (energies <= energy_range[1])
+            energies_plot = energies[mask]
+            total_dos_up_plot = total_dos_up[mask]
+            total_dos_down_plot = total_dos_down[mask]
+        else:
+            energies_plot = energies
+            total_dos_up_plot = total_dos_up
+            total_dos_down_plot = total_dos_down
+            mask = slice(None)
+        fig, ax = plt.subplots(figsize=(9, 6))
+        ax.axhline(0, color="black", linewidth=0.8)
+        ax.axvline(0, color="gray", linewidth=1.0, linestyle="--")
+        ax.plot(energies_plot, total_dos_up_plot, linewidth=1.8, color="tab:red", label="Total DOS (up)")
+        if np.any(total_dos_down_plot):
+            ax.plot(energies_plot, -total_dos_down_plot, linewidth=1.8, color="tab:red", label="Total DOS (down)")
+        if element_dos is not None:
+            for element, (edos_up, edos_down) in element_dos.items():
+                edos_up = np.asarray(edos_up)
+                edos_down = np.asarray(edos_down) if edos_down is not None else np.array([])
+                if edos_down.size == 0:
+                    edos_down = np.zeros_like(edos_up)
+                edos_up_plot = edos_up[mask]
+                edos_down_plot = edos_down[mask]
+                line = ax.plot(energies_plot, edos_up_plot, linewidth=1.5, alpha=0.9, label=f"{element} (up)")[0]
+                if np.any(edos_down_plot):
+                    ax.plot(energies_plot, -edos_down_plot, linewidth=1.5, alpha=0.9, color=line.get_color(), label=f"{element} (down)")
+        ax.set_xlabel(r"E - E$_F$ (eV)")
+        ax.set_ylabel("DOS")
+        ax.set_xlim(-15, 15)
+        ax.set_ylim(-50, 50)
+        ax.legend(frameon=False, fontsize=9, ncol=2)
+        fig.tight_layout()
+        fig.savefig(file_name, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
     def get_dos_data(self, 
-                     dir_name: str=None, 
-                     dos: Optional[CompleteDos]=None,
-                     energy_range: Optional[List[float]]=None
-                     ) -> List[float]:
+                      dir_name: str=None, 
+                      dos: Optional[CompleteDos]=None,
+                      energy_range: Optional[List[float]]=None,
+                      plot: bool=False,
+                      ) -> List[float]:
         """Retrieves the band gap and band centers from the DOS data in the specified directory. 
             Either `DOSCAR` or `vasprun.xml` should be present in the directory.
 
@@ -346,11 +397,10 @@ class GetFeatures:
                 band_gap = dos.get_gap()
                 energies = dos.energies - dos.efermi
                 if energy_range:
-                    mask = energy_range[0] <= energies <= energy_range[1]
+                    mask = (energies >= energy_range[0]) & (energies <= energy_range[1])
                     energies = energies[mask]
-                else:
-                    mask_val = energies < 0
-                    mask_cond = energies >= 0
+                mask_val = energies < 0
+                mask_cond = energies >= 0
                 try:
                     tdos = dos.densities[Spin.up]+dos.densities[Spin.down]
                 except KeyError:
@@ -392,6 +442,18 @@ class GetFeatures:
                                        dos.get_band_center(band=OrbitalType.p, 
                                                            elements=bridging_elements, 
                                                            erange=[0, max(energies)])]
+                if plot:
+                    element_dos = {}
+                    for element, element_dos_obj in dos.get_element_dos().items():
+                        edos_up = element_dos_obj.densities.get(Spin.up, np.array([]))
+                        edos_down = element_dos_obj.densities.get(Spin.down, np.array([]))
+                        element_dos[str(element)] = (edos_up, edos_down)
+                    self.plot_dos(energies=dos.energies - dos.efermi,
+                                  total_dos_up=dos.densities.get(Spin.up, np.array([])),
+                                  total_dos_down=dos.densities.get(Spin.down, np.array([])),
+                                  element_dos=element_dos,
+                                  energy_range=energy_range,
+                                  file_name="dos.png")
                 return ([band_gap] + band_centers + p_band_centers + d_band_centers + 
                         metal_p_band_centers + metal_d_band_centers + brid_p_band_centers)
             except Exception:
@@ -417,12 +479,37 @@ class GetFeatures:
                 indices = [atom.index for atom in self.relaxed_atoms if atom.symbol in bridging_elements]
                 temp_dos_up, temp_dos_down = dos.get_select_atoms_orbital_projected_dos(indices,"p")
                 brid_p_band_centers = get_band_centers(dos, temp_dos_up, temp_dos_down)
+                if plot:
+                    element_dos = {}
+                    if dos.partial_dos is not None:
+                        for element in sorted(set(atom.symbol for atom in self.relaxed_atoms)):
+                            indices = [atom.index for atom in self.relaxed_atoms if atom.symbol == element]
+                            if len(indices) == 0:
+                                continue
+                            dos_by_element = np.sum(dos.partial_dos[indices], axis=0)
+                            if dos.is_spin_polarized:
+                                edos_up = np.sum(dos_by_element[:, 0::2], axis=1)
+                                edos_down = np.sum(dos_by_element[:, 1::2], axis=1)
+                            else:
+                                edos_up = np.sum(dos_by_element, axis=1)
+                                edos_down = np.zeros_like(edos_up)
+                            element_dos[element] = (edos_up, edos_down)
+                    self.plot_dos(energies=dos.energies_wrt_fermi,
+                                  total_dos_up=dos.total_dos_up,
+                                  total_dos_down=dos.total_dos_down,
+                                  element_dos=element_dos,
+                                  energy_range=energy_range,
+                                  file_name="dos.png")
                 return ([band_gap] + band_centers + p_band_centers + d_band_centers + 
                         metal_p_band_centers + metal_d_band_centers + brid_p_band_centers)
             elif os.path.exists("vasprun.xml"):
                 vasprun = Vasprun("vasprun.xml")
                 dos = vasprun.complete_dos
-                return self.get_dos_data(dir_name=dir_name, dos=dos)
+                return self.get_dos_data(dir_name=dir_name,
+                                         dos=dos,
+                                         energy_range=energy_range,
+                                         plot=plot
+                                         )
             else:
                 return [np.nan]*19
         except FileNotFoundError:
@@ -436,7 +523,8 @@ class GetFeatures:
                                  volume: float, 
                                  atoms_with_li: Atoms, 
                                  energy_with_li: float, 
-                                 mu_li: float
+                                 mu_li: float,
+                                 plot_dos: bool,
                                  ) -> List[float]:
         """Internal method to compute Li intercalation prerequisites.
         """
@@ -450,7 +538,7 @@ class GetFeatures:
         volume_change = (volume_with_li - volume)/volume
         li_m_b_distances = self.get_li_m_b_distances(atoms=atoms_with_li)
         li_m_b_charges = self.get_li_m_b_charges(dir_name=os.path.join(local_root, "bader"))
-        b_val_cond_band_centers = self.get_dos_data(dir_name=os.path.join(local_root, "dos"))[17:19]
+        b_val_cond_band_centers = self.get_dos_data(dir_name=os.path.join(local_root, "dos"), plot=plot_dos)[17:19]
         os.chdir(local_root)
         return [li_energy, volume_change]+li_m_b_distances+li_m_b_charges+b_val_cond_band_centers
     
@@ -463,7 +551,8 @@ class GetFeatures:
                                seed: int=10,
                                li_atom_cutoff: float=1.7,
                                li_li_cutoff: float=1.0,
-                               fhandle: Optional[IO]=None
+                               fhandle: Optional[IO]=None,
+                               plot_dos: bool=False,
                                ) -> List[float]:
         """Calculates the Li intercalation related properties for the material.
 
@@ -535,7 +624,7 @@ class GetFeatures:
                         continue
                     lists = [li_energies, volume_changes, li_m_distances, li_b_distances, m_b_distances, 
                              li_charges, m_charges, b_charges, b_val_band_centers, b_cond_band_centers]
-                    values = self.get_intercalation_values(atoms, energy, volume, atoms_with_li, energy_with_li, mu_li)
+                    values = self.get_intercalation_values(atoms, energy, volume, atoms_with_li, energy_with_li, mu_li, plot_dos)
                     fhandle.write(str_format.format(sample, values[0], values[2], values[3], values[4], values[5], 
                                                     values[6], values[7])) if fhandle else None
                     for lst, val in zip(lists, values):
@@ -586,7 +675,7 @@ class GetFeatures:
                     logging.warning(f"Failed to get intercalated structure for {ratio} Li/M. Taking intercalation values as NaN...")
                     data[ratio] = [np.nan]*10
                     continue
-                data[ratio] = self.get_intercalation_values(atoms, energy, volume, atoms_with_li, energy_with_li, mu_li)
+                data[ratio] = self.get_intercalation_values(atoms, energy, volume, atoms_with_li, energy_with_li, mu_li, plot_dos)
             return sum([data[ratio] for ratio in li_m_ratios], [])
         finally:
             os.chdir(self._root)
@@ -598,6 +687,7 @@ class GetFeatures:
                             dt: float=0.2,
                             com: bool=False,
                             interpolate_arrhenius: bool=False,
+                            interpolation_temperatures: Optional[List[float]]=None,
                             plot: bool=False,
                             ) -> dict:
         """Calculates the Li diffusion coefficients for the material.
@@ -612,6 +702,8 @@ class GetFeatures:
             com (bool, optional): Whether to use center of mass corrected MSD. Defaults to False.
             interpolate_arrhenius (bool, optional): Whether to interpolate missing diffusion coefficients 
                 with Arrhenius equation. Defaults to False.
+            interpolation_temperatures (Optional[List[float]], optional): Which temperatures to be used for 
+                Arrhenius interpolation. If None, all available temperatures are used. Defaults to None.
             plot (bool, optional): Whether to plot the MSD vs time graph and the Arrhenius graph. Defaults to False.
 
         Returns:
@@ -620,6 +712,7 @@ class GetFeatures:
                 tuples and values are the corresponding diffusion coefficients in Å²/ps.
         """
         os.chdir(self.material_dir)
+        diff_coeffs = {}
         try:
             os.chdir("Diffusion_calculation")
         except FileNotFoundError:
@@ -628,8 +721,8 @@ class GetFeatures:
             for ratio in li_m_ratios:
                 for temperature in temperatures:
                     diff_coeffs[(ratio, temperature)] = np.nan
+            os.chdir(self._root)
             return diff_coeffs
-        diff_coeffs = {}
         if com:
             msd_col_idx = msd_col_idx+1
         for ratio in li_m_ratios:
@@ -704,8 +797,10 @@ class GetFeatures:
                 if temperature in temperatures:
                     diff_coeffs[(ratio, temperature)] = ratio_diff_coeffs[temperature]
             ratio_diff_coeffs = {k: v for k, v in ratio_diff_coeffs.items() if not np.isnan(v)}
-            if missing_temperatures!=[] and len(ratio_diff_coeffs) >= 2 and interpolate_arrhenius is True:
-                ts = np.array(available_temperatures)
+            if interpolation_temperatures is None:
+                interpolation_temperatures = available_temperatures
+            if missing_temperatures!=[] and len(interpolation_temperatures) >= 2 and interpolate_arrhenius is True:
+                ts = np.array(interpolation_temperatures)
                 ds = np.array([ratio_diff_coeffs[t] for t in ts])
                 inv_ts = 1/ts
                 log_ds = np.log(ds)
@@ -888,7 +983,9 @@ class GetFeatures:
         self.charges = self.get_li_m_b_charges()
         if all(np.isnan(self.charges)):
             logging.warning(f"`Bader_calculation` does not exist/is not completed at `{material_dir}`. Taking charges as NaN...")
-        self.dos_data = self.get_dos_data(energy_range=kwargs.get("energy_range", None))
+        self.dos_data = self.get_dos_data(energy_range=kwargs.get("energy_range", None),
+                                          plot=kwargs.get("plot_dos", False),
+                                          )
         if all(np.isnan(self.dos_data)):
             logging.warning(f"`Electronic_calculation` does not exist/is not completed at `{material_dir}`. "
                             "Taking band gap and band centers as NaN...")
@@ -900,7 +997,8 @@ class GetFeatures:
                                                             seed=kwargs.get("seed", 10),
                                                             li_atom_cutoff=kwargs.get("li_atom_cutoff", 1.7),
                                                             li_li_cutoff=kwargs.get("li_li_cutoff", 1.0),
-                                                            fhandle=kwargs.get("fhandle", None)
+                                                            fhandle=kwargs.get("fhandle", None),
+                                                            plot_dos=kwargs.get("plot_dos", False)
                                                             )
         if all(np.isnan(self.intercalation_data)):
             logging.warning(f"`Intercalation` does not exist/is not completed at `{material_dir}`. " 
@@ -912,6 +1010,7 @@ class GetFeatures:
                                             dt=kwargs.get("dt", 0.2),
                                             com=kwargs.get("com", False),
                                             interpolate_arrhenius=kwargs.get("interpolate_arrhenius", False),
+                                            interpolation_temperatures=kwargs.get("interpolation_temperatures", None),
                                             plot=kwargs.get("plot_diffusion", False)
                                             )
         for ratio in kwargs.get("li_m_ratios", [0.25]):
