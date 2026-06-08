@@ -14,10 +14,12 @@ import numpy as np
 from sklearn.metrics import get_scorer, r2_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from sklearn.model_selection import RepeatedKFold
 from sklearn.pipeline import Pipeline
 import shap
 import tpot
 from matplotlib import pyplot as plt
+import seaborn as sns
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -56,10 +58,8 @@ class MaterialsEchemRegressor:
                         pca_n_features: int=33,
                         scale_x: bool=False,
                         scale_y: bool=False,
-                        replace_data: dict={
-                            "Nb2O5-T": {"Band Gap": 1.925}, 
-                            "Nb2O5-TT": {"Band Gap": 1.773}
-                            }
+                        replace_data: dict={},
+                        plot: bool=False
                         ) -> Tuple[DataFrame, DataFrame]:
         """Preprocesses the material features and electrochemical performance data.
 
@@ -77,7 +77,7 @@ class MaterialsEchemRegressor:
             scale_x (bool, optional): If True, scales `x` using StandardScaler. Defaults to False.
             scale_y (bool, optional): If True, scales `y` using StandardScaler. Defaults to False.
             replace_data (dict, optional): Dictionary containing the values to be replaced in `x` for specific materials and features.
-                Defaults to {"Nb2O5-T": {"Band Gap": 1.925}, "Nb2O5-TT": {"Band Gap": 1.773}}.
+                For example, {"Nb2O5-T": {"Band Gap": 1.925}, "Nb2O5-TT": {"Band Gap": 1.773}}. Defaults to {}.
 
         Returns:
             Tuple[DataFrame, DataFrame]: Processed `x` and `y` which can be used to train the models.
@@ -105,36 +105,83 @@ class MaterialsEchemRegressor:
         x = x.loc[:, (x!=0).any(axis=0)]
         if len(x)>10:
             x = x.loc[:, x.nunique() > 10]
+        x = x.dropna(axis=1)
 
         corr = x.corr(method="pearson").fillna(0)
+        if plot:
+            plt.figure(figsize=(20, 20))
+            sns.heatmap(corr, annot=False, cmap="coolwarm", fmt=".2f", linewidths=0.5, square=True)
+            plt.savefig("correlation.png", dpi=300)
+            plt.close()
         corr = corr.stack().reset_index()
         corr.columns = ["Feature1", "Feature2", "Correlation"]
         corr = corr[corr["Feature1"] < corr["Feature2"]]
         high_corr_pairs = corr[abs(corr["Correlation"]) > max_correlation_allowed]
         high_corr_pairs = high_corr_pairs.sort_values(by="Correlation", ascending=False)
         high_corr_pairs = high_corr_pairs.reset_index(drop=True)
-        feature2 = high_corr_pairs["Feature2"].values
+        # feature2 = high_corr_pairs["Feature2"].values
+        # x = x.drop(columns=np.unique(feature2))
+        variance = x.var(numeric_only=True)
+        to_drop = set()
+        for _, row in high_corr_pairs.iterrows():
+            f1 = row["Feature1"]
+            f2 = row["Feature2"]
+            if variance[f1] < variance[f2]:
+                to_drop.add(f1)
+            else:
+                to_drop.add(f2)
+        x = x.drop(columns=sorted(to_drop))
 
-        x = x.drop(columns=np.unique(feature2))
         scaler = StandardScaler()
         x_scaled = scaler.fit_transform(x)
-
         pca = PCA(n_components=pca_n_components)
         pca.fit(x_scaled)
-        loadings = np.abs(pca.components_.T)
+        loadings = np.abs(pca.components_)
         explained_variance_ratio = pca.explained_variance_ratio_
-        feature_importance = np.dot(loadings, explained_variance_ratio)
+        if plot:
+            pcs = np.arange(1, len(explained_variance_ratio) + 1)
+            plt.figure(figsize=(8, 5))
+            plt.plot(pcs, explained_variance_ratio*100, marker="o", color="maroon", label="Explained variance")
+            plt.xticks(pcs)
+            plt.xlabel("Principal Component")
+            plt.ylabel("Explained Variance Ratio")
+            plt.title("PCA Explained Variance")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig("pca.png")
+            plt.close()
+        feature_importance = (loadings*explained_variance_ratio[:, None]).sum(axis=0)
+        importance_with_labels = pd.Series(feature_importance, index=x.columns).sort_values(ascending=False)
+        if plot:
+            plt.figure(figsize=(12, 9))
+            x_positions = np.arange(len(importance_with_labels))
+            plt.bar(x_positions, importance_with_labels.values, color="maroon")
+            plt.xticks(
+                x_positions,
+                importance_with_labels.index,
+                # [str(i + 1) for i in x_positions],
+                rotation=90,
+                ha="center",
+                fontsize=14,
+            )
+            plt.xlabel("Feature Number", fontsize=16)
+            plt.ylabel("Importance Score", fontsize=16)
+            plt.title("Feature Importances from PCA", fontsize=18)
+            plt.ylim(bottom=0.10)
+            plt.tight_layout()
+            plt.savefig("importance.png", dpi=300)
+            plt.close()
         feature_ranking_indices = np.argsort(-feature_importance)
         selected_features_pca = x.columns[feature_ranking_indices].values
         if scale_x:
             with open("scale_x.pkl", "wb") as f:
                 pickle.dump((scaler.mean_, scaler.scale_), f)
             x_scaled = pd.DataFrame(x_scaled, columns=x.columns)
-            x = x_scaled[selected_features_pca[0:pca_n_features]]
+            x = x_scaled[selected_features_pca[0:pca_n_features]].copy()
         else:
             x = x[selected_features_pca[0:pca_n_features]]
-        x["material"] = materials
-        x["composition"] = compositions
+        x.loc[:, "material"] = materials
+        x.loc[:, "composition"] = compositions
         file_name = f"x_{tag}.pkl" if tag else "x.pkl"
         x.to_pickle(file_name)
 
@@ -155,8 +202,9 @@ class MaterialsEchemRegressor:
                 y[target_property] = y[f"Rev. Cap at {c_rate}, mAh/g"].values
             y = y[target_property]
             if scale_y:
-                y_scaled = scaler.fit_transform(y)
-                with open("scale_y.pkl", "wb"):
+                y_df = y.to_frame(name=target_property)
+                y_scaled = scaler.fit_transform(y_df)
+                with open("scale_y.pkl", "wb") as f:
                     pickle.dump((scaler.mean_, scaler.scale_), f)
                 y = pd.Series(y_scaled.flatten(), name=y.name, index=y.index)
             file_name = f"y_{tag}.pkl" if tag else "y.pkl"
@@ -288,6 +336,8 @@ class MaterialsEchemRegressor:
             job_id: int=0,
             tpot_generations: int=50,
             tpot_population_size: int=50,
+            kfold_n_splits: int=5,
+            kfold_n_repeats: int=1
             ) -> Tuple[Pipeline, float]:
         """Trains a model using the specified job_id in reference to the jobs in `jobs.pkl`. Training is done using TPOT.
 
@@ -313,6 +363,10 @@ class MaterialsEchemRegressor:
                 f"`x_train` is not provided and `x_train.pkl` does not exist.\n"
                 "Please run `preprocess_data(tag=\"train\")` or provide `x_train` explicitly."
             )
+        try:
+            x_train.drop(columns=["material", "composition"])
+        except Exception:
+            pass
         if y_train is None:
             try:
                 y_train = pd.read_pickle("y_train.pkl")
@@ -331,11 +385,14 @@ class MaterialsEchemRegressor:
         features = all_combinations[job_id]
         x_train_subset = x_train[list(features)]
         if version.parse(tpot.__version__) <= version.parse("0.12.2"):
-            est = tpot.TPOTRegressor(generations=tpot_generations, 
+            est = tpot.TPOTRegressor(
+                                     generations=tpot_generations, 
                                      population_size=tpot_population_size, 
+                                     cv=RepeatedKFold(n_splits=kfold_n_splits, n_repeats=kfold_n_repeats, random_state=42),
                                      verbosity=2, 
                                      random_state=42, 
-                                     scoring="r2"
+                                     scoring="r2",
+                                     early_stop=10,
                                      )
         else:
             est = tpot.TPOTEstimator(search_space="linear", 
@@ -344,9 +401,14 @@ class MaterialsEchemRegressor:
                                      classification=False, 
                                      generations=tpot_generations, 
                                      population_size=tpot_population_size, 
+                                     cv=RepeatedKFold(n_splits=kfold_n_splits, n_repeats=kfold_n_repeats, random_state=42),
                                      verbose=2, 
                                      random_state=42, 
-                                     max_time_mins=None
+                                     early_stop=10,
+                                     max_time_mins=None,
+                                     n_jobs=1,
+                                     client=None,
+                                     memory_limit="auto",
                                      )
         try:
             logging.info(f"Training job_id {job_id}...")
@@ -420,6 +482,51 @@ class MaterialsEchemRegressor:
         plt.xlabel("Train CV score range")
         plt.ylabel("Distribution of Train CV score across models")
         plt.savefig("train_score_distribution.png", bbox_inches="tight")
+        return fig
+
+    def get_model_distribution(self, cv_score_cutoff: float=0.5) -> plt.Figure:
+        """Generates a bar plot showing the distribution of scikit-learn model types in top models.
+
+        Args:
+            cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
+
+        Returns:
+            plt.Figure: Matplotlib figure object showing the distribution of model types.
+        """
+        self.process_train_results()
+        metadata = self.metadata
+        models = self.models
+        top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
+        model_names = []
+        for _, row in top_models_info.iterrows():
+            job_id = row["job_id"]
+            model = models[job_id]
+            if model is None:
+                continue
+            if isinstance(model, Pipeline):
+                model = model.steps[-1][1]
+                print(model)
+            model_names.append(model.__class__.__name__)
+        if not model_names:
+            raise ValueError(
+                f"No trained models found with cv_score > {cv_score_cutoff} in `{self.db_path}`."
+            )
+        model_counts = pd.Series(model_names).value_counts()
+        fig = plt.figure(dpi=200, figsize=(6, 6))
+        ax = fig.gca()
+        x_positions = list(range(len(model_counts)))
+        ax.bar(x_positions, model_counts.values.tolist(), color="royalblue")
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(model_counts.index.tolist(), rotation=45, ha="right")
+        for axis in ["top", "bottom", "left", "right"]:
+            ax.spines[axis].set_linewidth(1.5)
+        ax.tick_params(bottom=True, top=True, left=True, right=True)
+        ax.tick_params(axis="x", direction="in")
+        ax.tick_params(axis="y", direction="in")
+        plt.xlabel("Scikit-learn model type")
+        plt.ylabel(f"Frequency in top models (Train CV score > {cv_score_cutoff})")
+        plt.tight_layout()
+        plt.savefig("models.png", bbox_inches="tight")
         return fig
     
     def get_feature_counts(self, cv_score_cutoff: float=0.5) -> plt.Figure:
@@ -507,7 +614,8 @@ class MaterialsEchemRegressor:
                         cv_score_cutoff: float=0.5, 
                         sample_size: int=100, 
                         shap_dir: str="shaps", 
-                        save_shap: bool=True
+                        save_shap: bool=True,
+                        plot: bool=True
                         ) -> Tuple[DataFrame, Series]:
         """Computes the mean absolute SHAP values for all features across all top models.
 
@@ -560,6 +668,12 @@ class MaterialsEchemRegressor:
         shap_df = pd.DataFrame(shap_list).fillna(0)
         shap_df = shap_df.reset_index().rename(columns={"index": "job_id"})
         model_avg_shap = shap_df.drop(columns="job_id").mean(axis=0).sort_values(ascending=False)
+        if plot:
+            model_avg_shap = model_avg_shap.sort_values()
+            fig, ax = plt.subplots(figsize=(8,8))
+            ax.barh(model_avg_shap.index, model_avg_shap.values, color="indigo")
+            plt.xlabel("Model Averaged SHAP Value")
+            plt.savefig("shap.png", bbox_inches="tight", dpi=300)
         return shap_df, model_avg_shap
     
     def test(self,
