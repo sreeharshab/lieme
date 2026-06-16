@@ -292,8 +292,12 @@ class MaterialsEchemRegressor:
             results_paths = glob.glob(f"{self.results_dir}/results_*.pkl")
             if job_ids:
                 results_paths = [path for path in results_paths if int(path.split("_")[-1].split(".")[0]) in job_ids]
+            existing_results = cursor.execute("SELECT job_id FROM models")
+            existing_results = set(row[0] for row in existing_results.fetchall())
+            existing_results_paths = set(path for path in results_paths if int(path.split("_")[-1].split(".")[0]) in existing_results)
             batch_data = []
-            for path in results_paths:
+            remaining_results = list(set(results_paths) - existing_results_paths)
+            for path in remaining_results:
                 with open(path, "rb") as f:
                     data = pickle.load(f)
                 if data["cv_score"]>cv_score_cutoff:
@@ -680,7 +684,6 @@ class MaterialsEchemRegressor:
              x_test: Optional[DataFrame]=None,
              cv_score_cutoff: float=0.5,
              excluded_features: Optional[List[str]]=None,
-             meta_model: Optional[Pipeline]=None,
              scale_x: bool=False,
              inverse_transform_y: bool=False
              ) -> DataFrame:
@@ -692,8 +695,6 @@ class MaterialsEchemRegressor:
             cv_score_cutoff (float, optional): CV score cutoff to determine top models. Defaults to 0.5.
             excluded_features (Optional[List[str]], optional): All models which contain the excluded features 
                 are not used to test. Defaults to None.
-            meta_model (Optional[Pipeline], optional): If provided, a stacking regressor is built using the top models 
-                as base models and `meta_model` as the final estimator. Defaults to None.
             scale_x (bool, optional): If True, scales `x_test` using the scaling parameters saved during preprocessing. 
                 Defaults to False.
             inverse_transform_y (bool, optional): If True, inverse transforms the predicted target property using the 
@@ -710,17 +711,20 @@ class MaterialsEchemRegressor:
                 raise FileNotFoundError(
                 f"`x_test` is not provided and `x_test.pkl` does not exist.\n"
             )
+        materials = x_test["material"]
+        compositions = x_test["composition"]
         if scale_x:
             try:
                 f = open("scale_x.pkl", "rb")
                 stats = pickle.load(f)
                 f.close()
+                x_test = x_test.drop(columns=["material", "composition"])
                 x_test_scaled = (x_test - stats[0])/stats[1]
                 x_test = x_test_scaled
+                x_test.loc[:, "material"] = materials
+                x_test.loc[:, "composition"] = compositions
             except FileNotFoundError:
                 logging.warning(f"`scale_x` is `True`, however, `scale_x.pkl` is not found. Using unscaled `x_test` for testing!")
-        materials = x_test["material"]
-        compositions = x_test["composition"]
         metadata = self.metadata
         top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
         predictions = []
@@ -739,28 +743,11 @@ class MaterialsEchemRegressor:
                 continue
             try:
                 model = self.models[job_id]
-                if meta_model is None:
-                    prediction = model.predict(x_test_subset.values)
-                    predictions.append(prediction)
-                else:
-                    preprocessor = ColumnTransformer(
-                        transformers=[("selector", "passthrough", list(features))],
-                        remainder="drop"
-                    )
-                    name = f"model_{job_id}"
-                    base_models.append(name, Pipeline([("preprocessor", preprocessor), ("regressor", model)]))
+                prediction = model.predict(x_test_subset.values)
+                predictions.append(prediction)
             except Exception as e:
                 logging.error(f"Skipping test using model {job_id} due to the following error.\n{e}")
-        if meta_model is None:
-            avg_predictions = np.mean(predictions, axis=0)
-        else:
-            stacking_regressor = StackingRegressor(
-                estimators=base_models,
-                final_estimator=meta_model,
-                cv=5
-            )
-            stacking_regressor.fit(x_train, y_train)
-            avg_predictions = stacking_regressor.predict(x_test)
+        avg_predictions = np.mean(predictions, axis=0)
         avg_predictions = pd.DataFrame({
             "material": materials,
             "composition": compositions,
@@ -777,6 +764,54 @@ class MaterialsEchemRegressor:
                                 "Returning scaled values in avg_predictions!")
         logging.info(f"Number of models used to make the predictions is {n_models_used}.")
         return avg_predictions
+    
+    def get_repeated_kfold_score(self,
+                                 x: Optional[DataFrame]=None,
+                                 y: Optional[DataFrame]=None,
+                                 cv_score_cutoff: float=0.5,
+                                 excluded_features: Optional[List[str]]=None,
+                                 n_splits: int=5,
+                                 n_repeats: int=4
+                                 ) -> tuple[float, float]:
+        if x is None:
+            x = pd.read_pickle("x_train.pkl")
+        if y is None:
+            y = pd.read_pickle("y_train.pkl")
+        rkf = RepeatedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=42)
+        fold_scores = []
+        self.process_train_results()
+        metadata = self.metadata
+        top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
+        for train_idx, val_idx in rkf.split(x, y):
+            x_train_fold = x.iloc[train_idx].reset_index(drop=True)
+            x_val_fold = x.iloc[val_idx].reset_index(drop=True)
+            y_train_fold = y.iloc[train_idx].reset_index(drop=True)
+            y_val_fold = y.iloc[val_idx].reset_index(drop=True)
+            fold_predictions = []
+            for _, row in top_models_info.iterrows():
+                job_id = row["job_id"]
+                features = row["features"]
+                if excluded_features and any(feature in excluded_features for feature in features):
+                    continue
+                try:
+                    x_train_subset = x_train_fold[list(features)]
+                    x_val_subset = x_val_fold[list(features)]
+                except KeyError:
+                    continue
+                model = self.models[job_id]
+                try:
+                    from sklearn.base import clone
+                    fitted_model = clone(model)
+                    fitted_model.fit(x_train_subset.values, y_train_fold.values)
+                    prediction = fitted_model.predict(x_val_subset.values)
+                    fold_predictions.append(prediction)
+                except Exception:
+                    continue
+            if not fold_predictions:
+                continue
+            avg_prediction = np.mean(fold_predictions, axis=0)
+            fold_scores.append(r2_score(y_val_fold, avg_prediction))
+        return float(np.mean(fold_scores)), float(np.std(fold_scores))
     
     def test_wrt_cutoffs(self,
                          x_test: Optional[DataFrame]=None,

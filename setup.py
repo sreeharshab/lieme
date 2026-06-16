@@ -26,6 +26,7 @@ setup(
     python_requires=">=3.11.0",
     install_requires=[
         "tpot>=0.12.2",
+        "scikit-learn>=1.5.2",
         "shap>=0.48.0",
         "ase>=3.23.0",
         "pymatgen>=2025.1.9",
