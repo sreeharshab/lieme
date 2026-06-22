@@ -1241,6 +1241,9 @@ class Intercalation:
             energies_with_li.append(energy_with_li)
             traj.write(atoms_with_li)
         traj.close()
-        traj_read.close() if 'traj_read' in locals() else None
+        try:
+            traj_read.close()
+        except AttributeError:
+            pass
         min_idx = np.argmin(energies_with_li)
         return atoms_list_with_li[min_idx], energies_with_li[min_idx]

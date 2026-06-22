@@ -109,6 +109,7 @@ class WorkFlowGenerator:
                 mode = "w"
                 pass
         else:
+            remaining = self.remove_sampling_size
             mode = "w"
         traj = Trajectory(traj_path, mode)
         atoms = self.atoms

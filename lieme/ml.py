@@ -16,6 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import RepeatedKFold
 from sklearn.pipeline import Pipeline
+from sklearn.base import clone
 import shap
 import tpot
 from matplotlib import pyplot as plt
@@ -728,7 +729,6 @@ class MaterialsEchemRegressor:
         metadata = self.metadata
         top_models_info = metadata[metadata["cv_score"] > cv_score_cutoff]
         predictions = []
-        base_models = []
         n_models_used = 0
         for _, row in top_models_info.iterrows():
             job_id = row["job_id"]
@@ -800,7 +800,6 @@ class MaterialsEchemRegressor:
                     continue
                 model = self.models[job_id]
                 try:
-                    from sklearn.base import clone
                     fitted_model = clone(model)
                     fitted_model.fit(x_train_subset.values, y_train_fold.values)
                     prediction = fitted_model.predict(x_val_subset.values)
