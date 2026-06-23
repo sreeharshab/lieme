@@ -510,7 +510,6 @@ class MaterialsEchemRegressor:
                 continue
             if isinstance(model, Pipeline):
                 model = model.steps[-1][1]
-                print(model)
             model_names.append(model.__class__.__name__)
         if not model_names:
             raise ValueError(

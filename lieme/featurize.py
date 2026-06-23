@@ -1243,7 +1243,7 @@ class Intercalation:
         traj.close()
         try:
             traj_read.close()
-        except AttributeError:
+        except (AttributeError, UnboundLocalError):
             pass
         min_idx = np.argmin(energies_with_li)
         return atoms_list_with_li[min_idx], energies_with_li[min_idx]
