@@ -242,7 +242,7 @@ class GetFeatures:
         if custom_cutoffs:
             kwargs = custom_cutoffs
         else:
-            kwargs = {"Mn":2, "Co":2, "Fe":2.5, "Nb":2, "C":1.7, "N":1.7}
+            kwargs = {"Mn":2, "Co":2, "Fe":2.5, "Nb":2, "C":1.7, "N":1.7, "V":2.2, "Ni":2, "Mo":2, "W":2, "Cr":2, "Ti":2.2}
         nat_cut = natural_cutoffs(atoms, **kwargs)
         nl = NeighborList(nat_cut, self_interaction=False, bothways=True)
         nl.update(atoms)
@@ -594,6 +594,7 @@ class GetFeatures:
                                             "Charge on M", "Charge on B"))
         data = {}
         self.mless = {}  # mless: minimum Li energy samples
+        _sub_root = os.getcwd()
         try:
             nlidirs = [entry.name for entry in os.scandir("Intercalation") if entry.is_dir()]
             if self.calc is not None:
@@ -619,7 +620,7 @@ class GetFeatures:
                     os.chdir(f"{sample}")
                     try:
                         atoms_with_li, energy_with_li = get_relaxed_atoms_and_energy(dir_name="geo_opt")
-                    except (FileNotFoundError, OSError):
+                    except (FileNotFoundError, OSError, StopIteration):
                         os.chdir("../")
                         continue
                     lists = [li_energies, volume_changes, li_m_distances, li_b_distances, m_b_distances, 
@@ -630,7 +631,16 @@ class GetFeatures:
                     for lst, val in zip(lists, values):
                         lst.append(val)
                     os.chdir("../")
-                mlei = li_energies.index(min(li_energies))  # mlei: minimum Li energy index
+                _min_e = min(li_energies)
+                _tol = 1e-3
+                _complete = [
+                    i for i, e in enumerate(li_energies)
+                    if _min_e - _tol <= e <= _min_e + _tol
+                    and not (np.isnan(li_charges[i]) and np.isnan(m_charges[i]) and np.isnan(b_charges[i]))
+                    and not (np.isnan(b_val_band_centers[i]) and np.isnan(b_cond_band_centers[i]))
+                ]
+                mlei = (min(_complete, key=lambda i: li_energies[i]) if _complete
+                        else li_energies.index(_min_e)) # Preferably take the sample with complete data
                 if (np.isnan(li_charges[mlei]) and np.isnan(m_charges[mlei]) and np.isnan(b_charges[mlei])):
                     logging.warning(f"bader does not exist/is not completed at `{os.getcwd()}/{samples[mlei]}`. Taking charges as NaN...")
                 if (np.isnan(b_val_band_centers[mlei]) and np.isnan(b_cond_band_centers[mlei])):
@@ -652,6 +662,7 @@ class GetFeatures:
                     data[ratio] = [np.nan]*10
             return sum([data[ratio] for ratio in li_m_ratios], [])
         except (FileNotFoundError, AssertionError):
+            os.chdir(_sub_root)
             if self.calc is None:
                 # This prevents error when calc is not provided but intercalation directories are also not complete.
                 # Skips the intercalation data in this case and takes it as NaN, while still allowing the rest of the 
