@@ -460,11 +460,11 @@ class WorkFlowGenerator:
                     lhfcalc=True,
                     algo="Damped",
                     hfscreen=0.2,
-                    time=0.2,
+                    time=0.1,
                     precfock="Fast",
-                    amix=0.2, # Reduce AMIX, BMIX and TIME if convergence issues arise
+                    amix=0.025, # Reduce AMIX, BMIX and TIME if convergence issues arise
                     bmix=0.0001,
-                    amix_mag=0.8,
+                    amix_mag=0.1,
                     bmix_mag=0.0001,
                     ###
                     ibrion=-1,
