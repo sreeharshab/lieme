@@ -174,13 +174,16 @@ class MaterialsEchemRegressor:
             plt.close()
         feature_ranking_indices = np.argsort(-feature_importance)
         selected_features_pca = x.columns[feature_ranking_indices].values
+        selected_features = selected_features_pca[0:pca_n_features]
         if scale_x:
             with open("scale_x.pkl", "wb") as f:
-                pickle.dump((scaler.mean_, scaler.scale_), f)
+                scale_x_mean = pd.Series(scaler.mean_, index=x.columns)
+                scale_x_scale = pd.Series(scaler.scale_, index=x.columns)
+                pickle.dump((scale_x_mean, scale_x_scale), f)
             x_scaled = pd.DataFrame(x_scaled, columns=x.columns)
-            x = x_scaled[selected_features_pca[0:pca_n_features]].copy()
+            x = x_scaled[selected_features].copy()
         else:
-            x = x[selected_features_pca[0:pca_n_features]]
+            x = x[selected_features]
         x.loc[:, "material"] = materials
         x.loc[:, "composition"] = compositions
         file_name = f"x_{tag}.pkl" if tag else "x.pkl"
@@ -719,8 +722,15 @@ class MaterialsEchemRegressor:
                 stats = pickle.load(f)
                 f.close()
                 x_test = x_test.drop(columns=["material", "composition"])
-                x_test_scaled = (x_test - stats[0])/stats[1]
-                x_test = x_test_scaled
+                x_test_features = x_test.columns
+                scale_features = stats[0].index
+                existing_features = x_test_features.intersection(scale_features)
+                missing_features = x_test_features.difference(scale_features)
+                if len(missing_features) > 0:
+                    logging.warning(f"The following features are present in `x_test` but not in `scale_x.pkl`: {missing_features}. "
+                                    "These features will be dropped from `x_test` before scaling.")
+                    x_test = x_test.drop(columns=missing_features)
+                x_test = (x_test[existing_features] - stats[0][existing_features])/stats[1][existing_features]
                 x_test.loc[:, "material"] = materials
                 x_test.loc[:, "composition"] = compositions
             except FileNotFoundError:
