@@ -512,7 +512,7 @@ class GetFeatures:
                                          )
             else:
                 return [np.nan]*19
-        except FileNotFoundError:
+        except Exception:
             return [np.nan]*19
         finally:
             os.chdir(self._root)
@@ -740,8 +740,14 @@ class GetFeatures:
             ratio_diff_coeffs = {}
             os.chdir(f"{ratio}_Li_M")
             available_temperatures = sorted([i for i in os.walk(".")][0][1])
-            folder_map = {float(folder): folder for folder in available_temperatures}
+            def try_float(folder):
+                try:
+                    return float(folder)
+                except ValueError:
+                    return None
+            folder_map = {try_float(folder): folder for folder in available_temperatures}
             available_temperatures = list(folder_map.keys())
+            available_temperatures = [t for t in available_temperatures if t is not None]
             missing_temperatures = list(set(temperatures) - set(available_temperatures))
             for temperature in available_temperatures:
                 try:
